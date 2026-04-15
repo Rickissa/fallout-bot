@@ -15,13 +15,14 @@ from telegram.ext import (
 )
 from datetime import time as dt_time
 
-# ============= CONFIG =============
+# ---------------- CONFIG ----------------
 BOT_TOKEN = "8498687732:AAEPVjiENgAbAf1n0PAbp7vqnPjrUAcg2yw"
 DATA_FILE = "data.json"
 VENUS_NAME = "Венера"
 LOG_PAGE_SIZE = 6
 SHOP_PAGE_SIZE = 5
 
+# Параметры производства
 PRODUCTION_TYPES = {
     "легкий": {"people": 15, "yield_min": 15, "yield_max": 25},
     "средний": {"people": 20, "yield_min": 25, "yield_max": 30},
@@ -29,12 +30,14 @@ PRODUCTION_TYPES = {
     "усиленный": {"people": 50, "yield_min": 50, "yield_max": 75}
 }
 
+# Параметры форм правления (по умолчанию)
 DEFAULT_GOVERNMENT_CONFIG = {
     "рабский_труд": {"people_cost": -10, "caps_gain": 35},
     "людские_отношения": {"people_gain": 2, "caps_cost": 25},
     "трудовые_отношения": {"goods_bonus": 10, "caps_cost": 10}
 }
 
+# Настройки дипломатии (длительность в днях)
 DEFAULT_DIPLOMACY_DURATION = {
     "pact": 3,
     "war": 2,
@@ -42,19 +45,25 @@ DEFAULT_DIPLOMACY_DURATION = {
     "trade": 3
 }
 
+# Цена за единицу товара (глобальная)
 DEFAULT_GOODS_PRICE = 10
+
+# Время выполнения ежедневных заданий (по умолчанию 18:00)
 DEFAULT_PRODUCTION_TIME = dt_time(18, 0)
 DEFAULT_GOVERNMENT_TIME = dt_time(18, 0)
+
+# ----------------------------------------
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ============= PERSISTENCE =============
+# ---------------- Persistence ----------------
 def load_data() -> Dict[str, Any]:
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
+            # ensure keys
             d.setdefault("players", {})
             d.setdefault("shop_items", [])
             d.setdefault("logs", [])
@@ -73,6 +82,7 @@ def load_data() -> Dict[str, Any]:
             d.setdefault("scheduled_payments", {})
             d.setdefault("scheduled_goods", {})
 
+            # Проверка целостности government_config
             gov_config = d.setdefault("government_config", {})
             for gtype, default_params in DEFAULT_GOVERNMENT_CONFIG.items():
                 if gtype not in gov_config:
@@ -82,19 +92,16 @@ def load_data() -> Dict[str, Any]:
                         if key not in gov_config[gtype]:
                             gov_config[gtype][key] = value
             
+            # Инициализируем поселения для существующих игроков
             for pid, player in d.get("players", {}).items():
-                if "settlement" not in player:
-                    player["settlement"] = {
-                        "name": f"Поселение {player.get('first_name', 'Игрок')}",
-                        "population": 0,
-                        "daily_income": 0,
-                        "balance": 0
-                    }
+                if "settlements" not in player:
+                    player["settlements"] = []
             
             return d
         except Exception as e:
             logger.exception("Failed to load data.json: %s", e)
     
+    # defaults
     return {
         "players": {},
         "shop_items": [],
@@ -152,7 +159,7 @@ def add_log(ctx: ContextTypes.DEFAULT_TYPE, text: str) -> None:
         del logs[: len(logs) - 5000]
     save_data(ctx)
 
-# ============= HELPERS =============
+# ---------------- Helpers ----------------
 def strid(uid: int) -> str:
     return str(uid)
 
@@ -273,7 +280,7 @@ def player_main_kb(is_admin: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🤝 Дипломатия", callback_data="player_diplomacy")],
         [InlineKeyboardButton("🏛 Форма правления", callback_data="player_government")],
         [InlineKeyboardButton("🏭 Производство", callback_data="player_production")],
-        [InlineKeyboardButton("🏘 Мое поселение", callback_data="player_settlement")],
+        [InlineKeyboardButton("🏘 Мои поселения", callback_data="player_settlement")],
         [InlineKeyboardButton("👤 Профиль", callback_data="player_profile")]
     ]
     if is_admin:
@@ -304,7 +311,7 @@ def admin_main_kb() -> InlineKeyboardMarkup:
     ]
     return InlineKeyboardMarkup(kb)
 
-# ============= PRODUCTION JOBS =============
+# ===== PRODUCTION JOBS =====
 async def production_job_callback(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     player_id = job.data["player_id"]
@@ -320,7 +327,7 @@ async def production_job_callback(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.send_message(
             chat_id=int(player_id),
-            text=f"🏭 Производство завершено! Вы получили {units} единиц товара ({prod_type} труд). Они добавлены на склад."
+            text=f"🏭 Производст��о завершено! Вы получили {units} единиц товара ({prod_type} труд). Они добавлены на склад."
         )
     except Exception as e:
         logger.error(f"Не удалось уведомить игрока {player_id} о производстве: {e}")
@@ -367,7 +374,8 @@ async def remove_production(player: dict, player_id: str, ctx: ContextTypes.DEFA
     cancel_production_job(ctx.application.job_queue, player_id)
     save_data(ctx)
 
-# ============= GOVERNMENT JOBS =============
+
+# ===== GOVERNMENT JOBS =====
 async def government_job_callback(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     player_id = job.data["player_id"]
@@ -440,7 +448,68 @@ def cancel_government_job(job_queue: JobQueue, player_id: str) -> None:
     for job in current_jobs:
         job.schedule_removal()
 
-# ============= SCHEDULED PAYMENTS JOBS =============
+
+# ===== SETTLEMENT INCOME JOBS =====
+async def settlement_income_callback(context: ContextTypes.DEFAULT_TYPE):
+    job = context.job
+    job_data = job.data
+    player_id = job_data["player_id"]
+    set_idx = job_data["set_idx"]
+    bot_data = context.application.bot_data
+    players = bot_data.get("players", {})
+    player = players.get(str(player_id))
+    if not player:
+        return
+    
+    settlements = player.get("settlements", [])
+    if set_idx < 0 or set_idx >= len(settlements):
+        return
+    
+    settlement = settlements[set_idx]
+    daily_income = settlement.get("daily_income", 0)
+    settlement["balance"] = settlement.get("balance", 0) + daily_income
+    
+    try:
+        if daily_income > 0:
+            await context.bot.send_message(
+                chat_id=int(player_id),
+                text=f"🏘 Поселение '{settlement['name']}' принесло доход:\n+{daily_income} крышек\nБаланс: {settlement['balance']}"
+            )
+        elif daily_income < 0:
+            await context.bot.send_message(
+                chat_id=int(player_id),
+                text=f"🏘 Поселение '{settlement['name']}' требует налога:\n{daily_income} крышек\nБаланс: {settlement['balance']}"
+            )
+    except Exception as e:
+        logger.error(f"Не удалось уведомить игрока {player_id} о доходе поселения: {e}")
+    add_log(context, f"Доход поселения {player_id} '{settlement['name']}': {daily_income} крышек")
+
+
+def schedule_settlement_income(job_queue: JobQueue, player_id: str, set_idx: int, schedule_time: dt_time) -> None:
+    if job_queue is None:
+        return
+    cancel_settlement_income(job_queue, player_id, set_idx)
+    job_queue.run_daily(
+        settlement_income_callback,
+        time=schedule_time,
+        days=tuple(range(7)),
+        data={"player_id": player_id, "set_idx": set_idx},
+        name=f"settlement_{player_id}_{set_idx}"
+    )
+
+
+def cancel_settlement_income(job_queue: JobQueue, player_id: str, set_idx: int = None) -> None:
+    if job_queue is None:
+        return
+    if set_idx is not None:
+        current_jobs = job_queue.get_jobs_by_name(f"settlement_{player_id}_{set_idx}")
+    else:
+        current_jobs = job_queue.get_jobs_by_name(f"settlement_{player_id}")
+    for job in current_jobs:
+        job.schedule_removal()
+
+
+# ===== SCHEDULED PAYMENTS JOBS =====
 async def scheduled_payment_callback(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     player_id = job.data["player_id"]
@@ -489,7 +558,8 @@ def cancel_payment_job(job_queue: JobQueue, player_id: str) -> None:
     for job in current_jobs:
         job.schedule_removal()
 
-# ============= SCHEDULED GOODS JOBS =============
+
+# ===== SCHEDULED GOODS JOBS =====
 async def scheduled_goods_callback(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     player_id = job.data["player_id"]
@@ -538,60 +608,8 @@ def cancel_goods_job(job_queue: JobQueue, player_id: str) -> None:
     for job in current_jobs:
         job.schedule_removal()
 
-# ============= SETTLEMENT INCOME JOBS =============
-async def settlement_income_callback(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    player_id = job.data["player_id"]
-    bot_data = context.application.bot_data
-    players = bot_data.get("players", {})
-    player = players.get(str(player_id))
-    if not player:
-        return
-    
-    settlement = player.get("settlement")
-    if not settlement:
-        return
-    
-    daily_income = settlement.get("daily_income", 0)
-    settlement["balance"] = settlement.get("balance", 0) + daily_income
-    
-    try:
-        if daily_income > 0:
-            await context.bot.send_message(
-                chat_id=int(player_id),
-                text=f"🏘 Ваше поселение '{settlement['name']}' принесло доход:\n+{daily_income} крышек\nБаланс поселения: {settlement['balance']}"
-            )
-        elif daily_income < 0:
-            await context.bot.send_message(
-                chat_id=int(player_id),
-                text=f"🏘 Ваше поселение '{settlement['name']}' требует налога:\n{daily_income} крышек\nБаланс поселения: {settlement['balance']}"
-            )
-    except Exception as e:
-        logger.error(f"Не удалось уведомить игрока {player_id} о доходе поселения: {e}")
-    add_log(context, f"Доход поселения {player_id}: {daily_income} крышек")
 
-
-def schedule_settlement_income(job_queue: JobQueue, player_id: str, schedule_time: dt_time) -> None:
-    if job_queue is None:
-        return
-    cancel_settlement_income(job_queue, player_id)
-    job_queue.run_daily(
-        settlement_income_callback,
-        time=schedule_time,
-        days=tuple(range(7)),
-        data={"player_id": player_id},
-        name=f"settlement_{player_id}"
-    )
-
-
-def cancel_settlement_income(job_queue: JobQueue, player_id: str) -> None:
-    if job_queue is None:
-        return
-    current_jobs = job_queue.get_jobs_by_name(f"settlement_{player_id}")
-    for job in current_jobs:
-        job.schedule_removal()
-
-# ============= WAR START JOB =============
+# ===== WAR START JOB =====
 async def war_start_job_callback(context: ContextTypes.DEFAULT_TYPE):
     job = context.job
     treaty_id = job.data["treaty_id"]
@@ -625,7 +643,7 @@ def schedule_war_start(job_queue: JobQueue, treaty_id: str, delay_days: float) -
         name=f"war_start_{treaty_id}"
     )
 
-# ============= COMMANDS =============
+# ===== COMMANDS =====
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = strid(user.id)
@@ -646,12 +664,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "actions": [],
             "production": None,
             "government": None,
-            "settlement": {
-                "name": f"Поселение {user.first_name or 'Игрок'}",
-                "population": 0,
-                "daily_income": 0,
-                "balance": 0
-            }
+            "settlements": []
         }
         ctx.user_data["awaiting_faction"] = True
         await ctx.bot.send_message(chat_id=user.id,
@@ -684,7 +697,7 @@ async def cmd_admin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     ctx.user_data["awaiting_admin_password"] = True
     await ctx.bot.send_message(chat_id=uid, text="Введи пароль админа (текстом):")
-    # ============= CALLBACK HANDLER =============
+    # ===== CALLBACK HANDLER =====
 async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -788,7 +801,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["awaiting_trade_qty"] = True
         return
 
-    # ===== СДЕЛКИ =====
+    # ===== DEAL ACCEPT/REJECT =====
     if data.startswith("deal_accept_"):
         deal_id = data.split("_", 2)[2]
         deal = bot_data["active_deals"].get(deal_id)
@@ -1021,6 +1034,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "troop_manage":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         troops = p.get("troops", [])
         if not troops:
             await ctx.bot.send_message(chat_id=int(uid), text="Войск нет.")
@@ -1035,6 +1051,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("troop_item_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         troops = p.get("troops", [])
         if idx < 0 or idx >= len(troops):
             await ctx.bot.send_message(chat_id=int(uid), text="Неверный индекс.")
@@ -1057,6 +1076,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("troop_del_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         troops = p.get("troops", [])
         if 0 <= idx < len(troops):
             removed = troops.pop(idx)
@@ -1067,9 +1089,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=int(uid), text="Нет такого войска.")
         return
 
-    # ===== СКЛАД =====
+    # ===== ХРАНИЛИЩЕ =====
     if data == "player_storage":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("storage", [])
         goods = p.get("goods", 0)
         txt = f"📦 СКЛАД\n\nПроизведённый товар: {goods} ед.\n{format_storage(items)}"
@@ -1088,6 +1113,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "storage_manage":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("storage", [])
         if not items:
             await ctx.bot.send_message(chat_id=int(uid), text="Склад пуст (нет записей).")
@@ -1103,6 +1131,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("storage_item_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("storage", [])
         if not (0 <= idx < len(items)):
             await ctx.bot.send_message(chat_id=int(uid), text="Неверный индекс.")
@@ -1125,6 +1156,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("storage_del_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("storage", [])
         if 0 <= idx < len(items):
             removed = items.pop(idx)
@@ -1138,6 +1172,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ===== БАЗА =====
     if data == "player_base":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("base", [])
         txt = f"🏰 БАЗА\n\n{format_base(items)}"
         kb = [
@@ -1155,6 +1192,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "base_manage":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("base", [])
         if not items:
             await ctx.bot.send_message(chat_id=int(uid), text="База пуста.")
@@ -1170,6 +1210,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("base_item_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("base", [])
         if not (0 <= idx < len(items)):
             await ctx.bot.send_message(chat_id=int(uid), text="Неверный индекс.")
@@ -1192,6 +1235,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("base_del_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("base", [])
         if 0 <= idx < len(items):
             removed = items.pop(idx)
@@ -1205,6 +1251,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ===== ФОКУС =====
     if data == "player_focus":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("focus", [])
         txt = f"🎯 ФОКУС\n\n{format_focus(items)}"
         kb = [
@@ -1222,6 +1271,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "focus_manage":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("focus", [])
         if not items:
             await ctx.bot.send_message(chat_id=int(uid), text="Фокус пуст.")
@@ -1237,6 +1289,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("focus_item_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("focus", [])
         if not (0 <= idx < len(items)):
             await ctx.bot.send_message(chat_id=int(uid), text="Неверный индекс.")
@@ -1259,6 +1314,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("focus_del_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("focus", [])
         if 0 <= idx < len(items):
             removed = items.pop(idx)
@@ -1272,6 +1330,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ===== ХОД ДЕЙСТВИЙ =====
     if data == "player_actions":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("actions", [])
         txt = f"🚶 ХОД ДЕЙСТВИЙ\n\n{format_actions(items)}"
         kb = [
@@ -1289,6 +1350,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data == "actions_manage":
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("actions", [])
         if not items:
             await ctx.bot.send_message(chat_id=int(uid), text="Записи о ходе действий пусты.")
@@ -1304,6 +1368,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("actions_item_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("actions", [])
         if not (0 <= idx < len(items)):
             await ctx.bot.send_message(chat_id=int(uid), text="Неверный индекс.")
@@ -1326,6 +1393,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data.startswith("actions_del_"):
         idx = int(data.split("_", 2)[2])
         p = players.get(uid)
+        if not p:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         items = p.get("actions", [])
         if 0 <= idx < len(items):
             removed = items.pop(idx)
@@ -1336,31 +1406,69 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=int(uid), text="Неверный индекс.")
         return
 
-    # ===== ПОСЕЛЕНИЕ ИГРОКА =====
+    # ===== ПОСЕЛЕНИЯ (ИГРОК) =====
     if data == "player_settlement":
         player = players.get(uid)
         if not player:
             await ctx.bot.send_message(chat_id=int(uid), text="Сначала /start")
             return
-        settlement = player.get("settlement", {})
-        if settlement is None:
-            await ctx.bot.send_message(chat_id=int(uid), text="🏘 У вас нет поселения.")
+        
+        settlements = player.get("settlements", [])
+        if not settlements:
+            await ctx.bot.send_message(
+                chat_id=int(uid), 
+                text="🏘 У вас нет поселений. Обратитесь к админу для создания.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data="player_profile")]])
+            )
             return
+        
+        kb = []
+        for i, settlement in enumerate(settlements):
+            name = settlement.get('name', f'Поселение {i+1}')
+            kb.append([InlineKeyboardButton(f"🏘 {name}", callback_data=f"player_set_view_{i}")])
+        kb.append([InlineKeyboardButton("Назад", callback_data="player_profile")])
+        
+        await ctx.bot.send_message(
+            chat_id=int(uid),
+            text="🏘 Выберите поселение для управления:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+        return
+
+    if data.startswith("player_set_view_"):
+        player = players.get(uid)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Сначала /start")
+            return
+        
+        try:
+            idx = int(data.split("_", 3)[3])
+        except:
+            await ctx.bot.send_message(chat_id=int(uid), text="Ошибка индекса.")
+            return
+        
+        settlements = player.get("settlements", [])
+        if idx < 0 or idx >= len(settlements):
+            await ctx.bot.send_message(chat_id=int(uid), text="Поселение не найдено.")
+            return
+        
+        settlement = settlements[idx]
         name = settlement.get("name", "Поселение")
         population = settlement.get("population", 0)
         daily_income = settlement.get("daily_income", 0)
         balance = settlement.get("balance", 0)
         
-        txt = f"🏘 МОЕ ПОСЕЛЕНИЕ\n\n"
-        txt += f"Название: {name}\n"
+        txt = f"🏘 ПОСЕЛЕНИЕ: {name}\n\n"
         txt += f"Население: {population}\n"
         txt += f"Ежедневный доход/налог: {daily_income} крышек\n"
         txt += f"Баланс поселения: {balance} крышек\n"
         
+        ctx.user_data["current_settlement_idx"] = idx
+        
         kb = [
             [InlineKeyboardButton("💰 Снять крышки", callback_data="settlement_withdraw")],
             [InlineKeyboardButton("📥 Добавить крышки", callback_data="settlement_deposit")],
-            [InlineKeyboardButton("Назад", callback_data="player_profile")]
+            [InlineKeyboardButton("Назад", callback_data="player_settlement")]
         ]
         await ctx.bot.send_message(chat_id=int(uid), text=txt, reply_markup=InlineKeyboardMarkup(kb))
         return
@@ -1368,8 +1476,15 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "settlement_withdraw":
         player = players.get(uid)
         if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
             return
-        settlement = player.get("settlement", {})
+        settlements = player.get("settlements", [])
+        idx = ctx.user_data.get("current_settlement_idx", 0)
+        if idx < 0 or idx >= len(settlements):
+            await ctx.bot.send_message(chat_id=int(uid), text="Поселение не найдено.")
+            return
+        
+        settlement = settlements[idx]
         balance = settlement.get("balance", 0)
         if balance <= 0:
             await ctx.bot.send_message(chat_id=int(uid), text=f"На поселении нет крышек для снятия. Баланс: {balance}")
@@ -1382,6 +1497,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "settlement_deposit":
         player = players.get(uid)
         if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
             return
         caps = player.get("caps", 0)
         if caps <= 0:
@@ -1398,8 +1514,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not p:
             await ctx.bot.send_message(chat_id=int(uid), text="Сначала /start")
             return
-        settlement = p.get("settlement", {})
-        settlement_name = settlement.get("name", "нет") if settlement else "нет"
+        settlements = p.get("settlements", [])
+        settlement_info = ""
+        if settlements:
+            settlement_info = f"Поселения: {len(settlements)} шт."
+        else:
+            settlement_info = "Поселения: 0 шт."
+        
         txt = f"👤 ПРОФИЛЬ\n\n"
         txt += f"Игрок: {p.get('first_name')} @{p.get('username')}\n"
         txt += f"Фракция: {p.get('faction')}\n"
@@ -1412,7 +1533,8 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         txt += f"Ход действий: {len(p.get('actions', []))}\n"
         txt += f"Производство: {'да' if p.get('production') else 'нет'}\n"
         txt += f"Форма правления: {p.get('government', {}).get('type', 'нет')}\n"
-        txt += f"Поселение: {settlement_name}"
+        txt += settlement_info
+        
         await ctx.bot.send_message(chat_id=int(uid), text=txt, reply_markup=player_main_kb(bot_data.get("ADMIN_ID") == user.id))
         return
 
@@ -1428,7 +1550,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         item = shop[idx]
         buyer = players.get(uid)
-        if not buyer or buyer.get("caps") is None:
+        if not buyer:
             await query.answer("Сначала /start")
             return
         price = item["price"]
@@ -1707,7 +1829,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await query.answer("Предложение устарело или уже обработано.")
             return
         if uid not in proposal["to_ids"]:
-            await query.answer("Это п��едложение не для вас.")
+            await query.answer("Это предложение не для вас.")
             return
 
         from_player = players.get(proposal["from_id"])
@@ -1824,6 +1946,8 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 text += f"Сменить можно через {max(0, days_left):.1f} дней.\n\n"
             else:
                 text += "Вы можете сменить форму.\n\n"
+        else:
+            text += "Выберите фо��му правления (смена возможна раз в 2 дня):\n\n"
 
         gov_config = bot_data.get("government_config", DEFAULT_GOVERNMENT_CONFIG)
         kb = []
@@ -1932,7 +2056,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.exception(f"Ошибка при выборе формы правления игроком {uid}: {e}")
             await ctx.bot.send_message(chat_id=int(uid), text="Произошла ошибка. Попробуйте позже.")
         return
-            # ===== ADMIN PANEL =====
+
+    if data == "noop":
+        await query.answer()
+        return
+
+    await ctx.bot.send_message(chat_id=int(uid), text="Неизвестная кнопка или функция в разработке.")
+        # ===== ADMIN FLOW =====
     if data == "admin_open":
         if admin_id is None:
             ctx.user_data["awaiting_admin_password"] = True
@@ -1983,13 +2113,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         actions = player.get('actions', [])
         production = player.get('production')
         gov = player.get('government')
-        settlement = player.get('settlement', {})
+        settlements = player.get('settlements', [])
 
         player_info = f"👤 Игрок: {player.get('first_name')} @{player.get('username')} (ID: {pid_str})\n"
         player_info += f"🏴 Фракция: {faction}\n"
         player_info += f"💠 Крышек: {caps}\n"
         player_info += f"📦 Товар: {goods}\n"
-        player_info += f"🏘 Поселение: {settlement.get('name', 'нет')}\n\n"
+        player_info += f"🏘 Поселений: {len(settlements)}\n\n"
 
         player_info += f"⚔️ Войска ({len(troops)}):\n"
         if troops:
@@ -2012,45 +2142,18 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         player_info += f"\n📦 Склад (записи): {len(storage)}"
         if storage:
-            player_info += " (первые 5):\n"
-            for i, item in enumerate(storage[:5], 1):
+            player_info += " (первые 3):\n"
+            for i, item in enumerate(storage[:3], 1):
                 player_info += f"  {i}. {item}\n"
-            if len(storage) > 5:
-                player_info += f"  ... и еще {len(storage) - 5} записей\n"
+            if len(storage) > 3:
+                player_info += f"  ... и ещё {len(storage) - 3} записей\n"
         else:
             player_info += "\n  Склад пуст\n"
-
-        player_info += f"\n🏰 База ({len(base)}):\n"
-        if base:
-            for i, item in enumerate(base[:3], 1):
-                player_info += f"  {i}. {item}\n"
-            if len(base) > 3:
-                player_info += f"  ... и еще {len(base) - 3} записей\n"
-        else:
-            player_info += "  База пуста\n"
-
-        player_info += f"\n🎯 Фокус ({len(focus)}):\n"
-        if focus:
-            for i, item in enumerate(focus[:3], 1):
-                player_info += f"  {i}. {item}\n"
-            if len(focus) > 3:
-                player_info += f"  ... и еще {len(focus) - 3} записей\n"
-        else:
-            player_info += "  Фокус пуст\n"
-
-        player_info += f"\n🚶 Ход действий ({len(actions)}):\n"
-        if actions:
-            for i, item in enumerate(actions[:3], 1):
-                player_info += f"  {i}. {item}\n"
-            if len(actions) > 3:
-                player_info += f"  ... и еще {len(actions) - 3} записей\n"
-        else:
-            player_info += "  Нет записей"
 
         kb = [
             [InlineKeyboardButton("Удалить игрока", callback_data=f"adm_delete_player_{pid_str}")],
             [InlineKeyboardButton("Выдать крышек", callback_data=f"adm_give_player_{pid_str}")],
-            [InlineKeyboardButton("Отнять крышек", callback_data=f"adm_take_player_{pid_str}")],
+            [InlineKeyboardButton("Отня��ь крышек", callback_data=f"adm_take_player_{pid_str}")],
             [InlineKeyboardButton("Выдать товар", callback_data=f"adm_give_goods_{pid_str}")],
             [InlineKeyboardButton("Забрать товар", callback_data=f"adm_take_goods_{pid_str}")],
             [InlineKeyboardButton("Выдать войска", callback_data=f"adm_give_troops_{pid_str}")],
@@ -2058,209 +2161,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("Управлять войсками", callback_data=f"adm_troops_{pid_str}")],
             [InlineKeyboardButton("Управлять производством", callback_data=f"adm_production_{pid_str}")],
             [InlineKeyboardButton("Управлять формой правления", callback_data=f"adm_government_{pid_str}")],
-            [InlineKeyboardButton("Управлять складом", callback_data=f"adm_storage_{pid_str}")],
-            [InlineKeyboardButton("Управлять базой", callback_data=f"adm_base_{pid_str}")],
-            [InlineKeyboardButton("Управлять фокусом", callback_data=f"adm_focus_{pid_str}")],
-            [InlineKeyboardButton("Управлять ходом", callback_data=f"adm_actions_{pid_str}")],
-            [InlineKeyboardButton("Управлять поселением", callback_data=f"adm_set_manage_{pid_str}")],
+            [InlineKeyboardButton("Управлять поселениями", callback_data=f"adm_settlements_{pid_str}")],
             [InlineKeyboardButton("Назад", callback_data="adm_players")]
         ]
         await ctx.bot.send_message(chat_id=int(uid), text=player_info, reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # ===== УПРАВЛЕНИЕ ПОСЕЛЕНИЯМИ (НОВОЕ - ИСПРАВЛЕННОЕ) =====
-    if data == "adm_settlements":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        players_map = bot_data.get("players", {})
-        if not players_map:
-            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
-            return
-        
-        kb = []
-        for pid_str, player in players_map.items():
-            faction = player.get('faction', 'не указана')
-            label = f"{faction} ({pid_str})"
-            kb.append([InlineKeyboardButton(label[:60], callback_data=f"adm_set_manage_{pid_str}")])
-        kb.append([InlineKeyboardButton("Назад", callback_data="admin_open")])
-        
-        await ctx.bot.send_message(chat_id=int(uid), text="🏘 Выберите игрока для управления поселением:",
-                                   reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    if data.startswith("adm_set_manage_"):
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        pid_str = data.split("_", 3)[3]
-        player = players.get(pid_str)
-        if not player:
-            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
-            return
-        
-        settlement = player.get("settlement")
-        if settlement is None:
-            kb = [
-                [InlineKeyboardButton("➕ Создать поселение", callback_data=f"adm_set_create_{pid_str}")],
-                [InlineKeyboardButton("Назад", callback_data="adm_settlements")]
-            ]
-            await ctx.bot.send_message(
-                chat_id=int(uid),
-                text=f"🏘 У игрока {player.get('first_name')} (фракция {player.get('faction')}) нет поселения.",
-                reply_markup=InlineKeyboardMarkup(kb)
-            )
-        else:
-            name = settlement.get('name', 'Поселение')
-            pop = settlement.get('population', 0)
-            income = settlement.get('daily_income', 0)
-            balance = settlement.get('balance', 0)
-            
-            txt = f"🏘 ПОСЕЛЕНИЕ ИГРОКА {player.get('first_name')}\n\n"
-            txt += f"Название: {name}\n"
-            txt += f"Население: {pop}\n"
-            txt += f"Ежедневный доход/налог: {income} крышек\n"
-            txt += f"Баланс поселения: {balance} крышек\n"
-            
-            kb = [
-                [InlineKeyboardButton("✏️ Изменить название", callback_data=f"adm_set_edit_name_{pid_str}")],
-                [InlineKeyboardButton("👥 Добавить население", callback_data=f"adm_set_add_pop_{pid_str}")],
-                [InlineKeyboardButton("👥 Забрать население", callback_data=f"adm_set_remove_pop_{pid_str}")],
-                [InlineKeyboardButton("💰 Установить доход", callback_data=f"adm_set_set_income_{pid_str}")],
-                [InlineKeyboardButton("➕ Добавить крышки", callback_data=f"adm_set_add_balance_{pid_str}")],
-                [InlineKeyboardButton("➖ Забрать крышки", callback_data=f"adm_set_remove_balance_{pid_str}")],
-                [InlineKeyboardButton("⏰ Установить время дохода", callback_data=f"adm_set_set_time_{pid_str}")],
-                [InlineKeyboardButton("❌ Удалить поселение", callback_data=f"adm_set_delete_{pid_str}")],
-                [InlineKeyboardButton("Назад", callback_data="adm_settlements")]
-            ]
-            await ctx.bot.send_message(chat_id=int(uid), text=txt, reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    if data.startswith("adm_set_create_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 3)[3]
-        ctx.user_data["adm_set_create"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите название для нового поселения:")
-        return
-
-    if data.startswith("adm_set_delete_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 3)[3]
-        player = players.get(pid_str)
-        if not player:
-            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
-            return
-        
-        cancel_settlement_income(ctx.application.job_queue, pid_str)
-        player["settlement"] = None
-        save_data(ctx)
-        
-        await ctx.bot.send_message(chat_id=int(uid), text=f"❌ Поселение удалено.")
-        try:
-            await ctx.bot.send_message(chat_id=int(pid_str), text="❌ Админ удалил ваше поселение.")
-        except:
-            pass
-        add_log(ctx, f"Админ {user.first_name} удалил поселение игрока {pid_str}")
-        return
-
-    if data.startswith("adm_set_edit_name_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 4)[4]
-        ctx.user_data["adm_set_edit_name"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новое название поселения:")
-        return
-
-    if data.startswith("adm_set_add_pop_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 4)[4]
-        ctx.user_data["adm_set_add_pop"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество людей для добавления:")
-        return
-
-    if data.startswith("adm_set_remove_pop_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 4)[4]
-        ctx.user_data["adm_set_remove_pop"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество людей для удаления:")
-        return
-
-    if data.startswith("adm_set_set_income_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 4)[4]
-        ctx.user_data["adm_set_set_income"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите ежедневный доход/налог (может быть отрицательным, например: -50):")
-        return
-
-    if data.startswith("adm_set_add_balance_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 4)[4]
-        ctx.user_data["adm_set_add_balance"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество крышек для добавления на баланс поселения:")
-        return
-
-    if data.startswith("adm_set_remove_balance_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 4)[4]
-        ctx.user_data["adm_set_remove_balance"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество крышек для вычитания из баланса поселения:")
-        return
-
-    if data.startswith("adm_set_set_time_"):
-        if admin_id != user.id:
-            return
-        pid_str = data.split("_", 4)[4]
-        ctx.user_data["adm_set_set_time"] = pid_str
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите время для ежедневного дохода в формате ЧЧ:ММ (например: 09:00):")
-        return
-
-    # ===== УДАЛЕНИЕ ИГРОКА =====
-    if data.startswith("adm_delete_player_"):
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        pid_str = data.split("_", 3)[3]
-        players_map = bot_data.get("players", {})
-        removed = players_map.pop(pid_str, None)
-        before = len(shop)
-        shop[:] = [it for it in shop if str(it.get("owner_id")) != pid_str]
-        after = len(shop)
-        if removed and removed.get("production"):
-            cancel_production_job(ctx.application.job_queue, pid_str)
-        if removed and removed.get("government"):
-            cancel_government_job(ctx.application.job_queue, pid_str)
-        cancel_settlement_income(ctx.application.job_queue, pid_str)
-        cancel_payment_job(ctx.application.job_queue, pid_str)
-        cancel_goods_job(ctx.application.job_queue, pid_str)
-        await ctx.bot.send_message(chat_id=int(uid), text=f"Игрок {pid_str} удалён. Удалено товаров: {before - after}.")
-        add_log(ctx, f"Админ {user.first_name} удалил игрока {pid_str} (удалено товаров {before - after})")
-        save_data(ctx)
-        if removed:
-            try:
-                await ctx.bot.send_message(chat_id=int(pid_str), text="Вы были удалены админом.")
-            except:
-                pass
-        return
-
-    if data.startswith("adm_give_player_") or data.startswith("adm_take_player_"):
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        mode = "give" if "give" in data else "take"
-        pid_str = data.split("_")[-1]
-        ctx.user_data["awaiting_admin_amount"] = {"mode": mode, "target": pid_str}
-        await ctx.bot.send_message(chat_id=int(uid),
-                                   text=f"Введи количество крышек для {'выдачи' if mode == 'give' else 'отъёма'} игроку {pid_str} (целое число):")
-        return
-
-    # ===== ВЫДАЧА/ИЗЪЯТИЕ ТОВАРА =====
+    # ===== ADMIN ТОВАР =====
     if data.startswith("adm_give_goods_"):
         if admin_id != user.id:
             return
@@ -2277,7 +2184,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=int(uid), text=f"Введите количество товара для изъятия у игрока {pid_str}:")
         return
 
-    # ===== УПРАВЛЕНИЕ ПРОИЗВОДСТВОМ =====
+    # ===== ADMIN ПРОИЗВОДСТВО =====
     if data.startswith("adm_production_"):
         if admin_id != user.id:
             await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
@@ -2326,7 +2233,252 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                    text="Введите новые параметры в формате: тип_труда количество_людей (например: легкий 10). Доступные типы: легкий, средний, тяжелый, усиленный.")
         return
 
-    # ===== ВЫДАЧА/ИЗЪЯТИЕ ВОЙСК =====
+    # ===== ADMIN ПОСЕЛЕНИЯ =====
+    if data == "adm_settlements":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        players_map = bot_data.get("players", {})
+        if not players_map:
+            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
+            return
+        
+        kb = []
+        for pid_str, player in players_map.items():
+            faction = player.get('faction', 'не указана')
+            label = f"{faction} ({pid_str})"
+            kb.append([InlineKeyboardButton(label[:60], callback_data=f"adm_set_player_{pid_str}")])
+        kb.append([InlineKeyboardButton("Назад", callback_data="admin_open")])
+        
+        await ctx.bot.send_message(chat_id=int(uid), text="🏘 Выберите игрока для управления поселениями:",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data.startswith("adm_set_player_"):
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        pid_str = data.split("_", 3)[3]
+        player = players.get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
+        
+        settlements = player.get("settlements", [])
+        
+        txt = f"🏘 ПОСЕЛЕНИЯ ИГРОКА {player.get('first_name')}\n\n"
+        txt += f"Всего поселений: {len(settlements)}\n\n"
+        
+        if settlements:
+            for i, s in enumerate(settlements, 1):
+                txt += f"{i}. {s.get('name', 'Без названия')} | Люди: {s.get('population', 0)} | Доход: {s.get('daily_income', 0)} крышек\n"
+        
+        kb = []
+        for i, settlement in enumerate(settlements):
+            name = settlement.get('name', f'Поселение {i+1}')
+            kb.append([InlineKeyboardButton(f"🏘 {name}", callback_data=f"adm_set_manage_{pid_str}_{i}")])
+        
+        kb.append([InlineKeyboardButton("➕ Создать поселение", callback_data=f"adm_set_create_{pid_str}")])
+        kb.append([InlineKeyboardButton("Назад", callback_data="adm_settlements")])
+        
+        await ctx.bot.send_message(chat_id=int(uid), text=txt, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data.startswith("adm_set_manage_"):
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            await ctx.bot.send_message(chat_id=int(uid), text="Ошибка в формате команды.")
+            return
+        
+        pid_str = parts[3]
+        try:
+            set_idx = int(parts[4])
+        except:
+            await ctx.bot.send_message(chat_id=int(uid), text="Ошибка индекса.")
+            return
+        
+        player = players.get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
+        
+        settlements = player.get("settlements", [])
+        if set_idx < 0 or set_idx >= len(settlements):
+            await ctx.bot.send_message(chat_id=int(uid), text="Поселение не найдено.")
+            return
+        
+        settlement = settlements[set_idx]
+        name = settlement.get('name', 'Поселение')
+        pop = settlement.get('population', 0)
+        income = settlement.get('daily_income', 0)
+        balance = settlement.get('balance', 0)
+        
+        txt = f"🏘 ПОСЕЛЕНИЕ: {name}\n\n"
+        txt += f"Население: {pop}\n"
+        txt += f"Ежедневный доход/налог: {income} крышек\n"
+        txt += f"Баланс поселения: {balance} крышек\n"
+        
+        ctx.user_data["adm_set_current"] = (pid_str, set_idx)
+        
+        kb = [
+            [InlineKeyboardButton("✏️ Изменить название", callback_data=f"adm_set_edit_name_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("👥 Добавить население", callback_data=f"adm_set_add_pop_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("👥 Забрать население", callback_data=f"adm_set_remove_pop_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("💰 Установить доход", callback_data=f"adm_set_set_income_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("➕ Добавить крышки", callback_data=f"adm_set_add_balance_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("➖ Забрать крышки", callback_data=f"adm_set_remove_balance_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("⏰ Установить время дохода", callback_data=f"adm_set_set_time_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("❌ Удалить поселение", callback_data=f"adm_set_delete_{pid_str}_{set_idx}")],
+            [InlineKeyboardButton("Назад", callback_data=f"adm_set_player_{pid_str}")]
+        ]
+        await ctx.bot.send_message(chat_id=int(uid), text=txt, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data.startswith("adm_set_create_"):
+        if admin_id != user.id:
+            return
+        pid_str = data.split("_", 3)[3]
+        ctx.user_data["adm_set_create"] = pid_str
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите название для нового поселения:")
+        return
+
+    if data.startswith("adm_set_delete_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        
+        player = players.get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
+        
+        settlements = player.get("settlements", [])
+        if set_idx < 0 or set_idx >= len(settlements):
+            await ctx.bot.send_message(chat_id=int(uid), text="Поселение не найдено.")
+            return
+        
+        settlement = settlements[set_idx]
+        cancel_settlement_income(ctx.application.job_queue, pid_str, set_idx)
+        removed = settlements.pop(set_idx)
+        save_data(ctx)
+        
+        await ctx.bot.send_message(chat_id=int(uid), text=f"❌ Поселение '{removed.get('name')}' удалено.")
+        try:
+            await ctx.bot.send_message(chat_id=int(pid_str), text=f"❌ Админ удалил ваше поселение '{removed.get('name')}'.")
+        except:
+            pass
+        add_log(ctx, f"Админ {user.first_name} удалил поселение '{removed.get('name')}' у игрока {pid_str}")
+        return
+
+    if data.startswith("adm_set_edit_name_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        ctx.user_data["adm_set_edit_name"] = (pid_str, set_idx)
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новое название поселения:")
+        return
+
+    if data.startswith("adm_set_add_pop_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        ctx.user_data["adm_set_add_pop"] = (pid_str, set_idx)
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество людей для добавления:")
+        return
+
+    if data.startswith("adm_set_remove_pop_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        ctx.user_data["adm_set_remove_pop"] = (pid_str, set_idx)
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество людей для удаления:")
+        return
+
+    if data.startswith("adm_set_set_income_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        ctx.user_data["adm_set_set_income"] = (pid_str, set_idx)
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите ежедневный доход/налог (может быть отрицательным, например: -50):")
+        return
+
+    if data.startswith("adm_set_add_balance_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        ctx.user_data["adm_set_add_balance"] = (pid_str, set_idx)
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество крышек для добавления на баланс поселения:")
+        return
+
+    if data.startswith("adm_set_remove_balance_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        ctx.user_data["adm_set_remove_balance"] = (pid_str, set_idx)
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите количество крышек для вычитания из баланса поселения:")
+        return
+
+    if data.startswith("adm_set_set_time_"):
+        if admin_id != user.id:
+            return
+        parts = data.split("_", 4)
+        if len(parts) < 5:
+            return
+        pid_str = parts[3]
+        set_idx = int(parts[4])
+        ctx.user_data["adm_set_set_time"] = (pid_str, set_idx)
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите вр��мя для ежедневного дохода в формате ЧЧ:ММ (например: 09:00):")
+        return
+
+    # ===== ADMIN ФОРМА ПРАВЛЕНИЯ =====
+    if data.startswith("adm_government_"):
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        pid_str = data.split("_", 2)[2]
+        player = players.get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
+        gov = player.get("government")
+        if gov:
+            await ctx.bot.send_message(chat_id=int(uid), text=f"У игрока уже есть форма правления: {gov['type']}. Чтобы изменить, используйте сброс через редактирование игрока.")
+        else:
+            await ctx.bot.send_message(chat_id=int(uid), text="У игрока нет формы правления. Вы можете назначить её через редактирование.")
+        return
+
+    # ===== ADMIN ВОЙСКА =====
     if data.startswith("adm_give_troops_"):
         if admin_id != user.id:
             await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
@@ -2347,7 +2499,350 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                                    text=f"Введи количество войск для изъятия у игрока {pid_str} (целое число):")
         return
 
-    # ===== УПРАВЛЕНИЕ ВОЙСКАМИ =====
+    # ===== ADMIN МАГАЗИН =====
+    if data == "adm_market":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+
+        market_items = bot_data.get("market_items", [])
+        if not market_items:
+            await ctx.bot.send_message(
+                chat_id=int(uid),
+                text="Магазин пуст.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Добавить в магазин", callback_data="adm_market_add")],
+                    [InlineKeyboardButton("Назад", callback_data="admin_open")]
+                ])
+            )
+            return
+
+        text = market_message_text(market_items)
+        kb = []
+        for i, item in enumerate(market_items, 1):
+            kb.append([InlineKeyboardButton(f"Удалить #{i}", callback_data=f"adm_market_del_{i - 1}")])
+        kb.append([InlineKeyboardButton("Добавить в магазин", callback_data="adm_market_add")])
+        kb.append([InlineKeyboardButton("Назад", callback_data="admin_open")])
+
+        await ctx.bot.send_message(chat_id=int(uid), text=text, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data == "adm_market_add":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        ctx.user_data["awaiting_market_item"] = True
+        await ctx.bot.send_message(chat_id=int(uid), text="Введи текст для добавления в магазин:")
+        return
+
+    if data.startswith("adm_market_del_"):
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        idx = int(data.split("_", 3)[3])
+        market_items = bot_data.get("market_items", [])
+        if 0 <= idx < len(market_items):
+            removed = market_items.pop(idx)
+            save_data(ctx)
+            await ctx.bot.send_message(chat_id=int(uid), text=f"Элемент '{removed}' удален из магазина.")
+            add_log(ctx, f"Админ {user.first_name} удалил из магазина: {removed}")
+        else:
+            await ctx.bot.send_message(chat_id=int(uid), text="Нет такого элемента.")
+        return
+
+    # ===== ADMIN ОТПРАВКА ХОДА =====
+    if data == "adm_send_turn":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+
+        players_map = bot_data.get("players", {})
+        if not players_map:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игроков пока нет.")
+            return
+
+        kb = []
+        for pid_str, info in players_map.items():
+            faction = info.get('faction', 'не указана')
+            label = f"{info.get('first_name') or '-'} ({faction})"
+            kb.append([InlineKeyboardButton(label[:60], callback_data=f"adm_send_turn_to_{pid_str}")])
+        kb.append([InlineKeyboardButton("Назад", callback_data="admin_open")])
+
+        await ctx.bot.send_message(chat_id=int(uid), text="Выбери игрока для отправки хода:",
+                                   reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data.startswith("adm_send_turn_to_"):
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+
+        pid_str = data.split("_", 4)[4]
+        player = bot_data.get("players", {}).get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
+
+        faction = player.get('faction', 'не указана')
+        player_name = player.get('first_name', 'Игрок')
+
+        kb = [
+            [InlineKeyboardButton("Отправить сразу", callback_data=f"adm_send_immediately_{pid_str}")],
+            [InlineKeyboardButton("Назад", callback_data="adm_send_turn")]
+        ]
+
+        await ctx.bot.send_message(
+            chat_id=int(uid),
+            text=f"Выбран игрок: {player_name} (Фракция: {faction})\nВыбери тип отправки:",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+        return
+
+    if data.startswith("adm_send_immediately_"):
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+
+        pid_str = data.split("_", 3)[3]
+        ctx.user_data["awaiting_turn_message"] = {"player_id": pid_str}
+        await ctx.bot.send_message(chat_id=int(uid), text="Введи сообщение для отправки:")
+        return
+
+    # ===== ADMIN ИНФОРМАЦИЯ =====
+    if data == "adm_all_troops":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+
+        players_map = bot_data.get("players", {})
+        if not players_map:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игроков пока нет.")
+            return
+
+        troops_info = "⚔️ Войска всех фракций:\n\n"
+
+        for pid_str, player in players_map.items():
+            faction = player.get('faction', 'не указана')
+            player_name = player.get('first_name', 'Неизвестный')
+            troops = player.get('troops', [])
+
+            troops_info += f"🏴 {player_name} ({faction}):\n"
+            if troops:
+                total_troops = sum(troop.get('qty', 0) for troop in troops)
+                troops_info += f"  Всего войск: {total_troops}\n"
+                for troop in troops:
+                    troops_info += f"  • {troop['name']}: {troop['qty']}\n"
+            else:
+                troops_info += "  Нет войск\n"
+            troops_info += "\n"
+
+        if len(troops_info) > 4000:
+            parts = [troops_info[i:i + 4000] for i in range(0, len(troops_info), 4000)]
+            for part in parts:
+                await ctx.bot.send_message(chat_id=int(uid), text=part)
+        else:
+            await ctx.bot.send_message(chat_id=int(uid), text=troops_info)
+
+        kb = [[InlineKeyboardButton("Назад", callback_data="admin_open")]]
+        await ctx.bot.send_message(chat_id=int(uid), text="Выбери действие:", reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data == "adm_all_goods":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        players_map = bot_data.get("players", {})
+        if not players_map:
+            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
+            return
+        lines = ["📦 Товары всех фракций:\n"]
+        for pid, p in players_map.items():
+            faction = p.get('faction') or 'не указана'
+            goods = p.get('goods', 0)
+            lines.append(f"• {faction} ({pid}): {goods} ед.")
+        text = "\n".join(lines)
+        await ctx.bot.send_message(chat_id=int(uid), text=text)
+        return
+
+    if data == "adm_all_governments":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        players_map = bot_data.get("players", {})
+        if not players_map:
+            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
+            return
+        lines = ["🏛 Формы правления всех фракций:\n"]
+        for pid, p in players_map.items():
+            faction = p.get('faction') or 'не указана'
+            gov = p.get('government')
+            if gov:
+                gov_type = gov.get('type', 'неизвестно')
+                lines.append(f"• {faction} ({pid}): {gov_type}")
+            else:
+                lines.append(f"• {faction} ({pid}): нет")
+        text = "\n".join(lines)
+        await ctx.bot.send_message(chat_id=int(uid), text=text)
+        return
+
+    if data == "adm_all_treaties":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        treaties = bot_data.get("active_treaties", {})
+        if not treaties:
+            await ctx.bot.send_message(chat_id=int(uid), text="Нет активных договоров.")
+            return
+        lines = ["🤝 Все активные дипломатические договоры:\n"]
+        for tid, t in treaties.items():
+            f1, f2 = t.get("factions", ["?", "?"])
+            type_name = {
+                "pact": "Пакт о ненападении",
+                "war": "Война" + (" (ожидание)" if t.get("pending") else ""),
+                "military": "Военный союз",
+                "trade": "Торговый союз"
+            }.get(t.get("type"), t.get("type"))
+            if t.get("pending"):
+                start_after = t.get("start_after", 0)
+                start_str = time.ctime(start_after) if start_after else "скоро"
+                lines.append(f"• {type_name}: {f1} <-> {f2} (начнётся {start_str})")
+            else:
+                end_str = time.ctime(t.get("end", 0)) if t.get("end") else "бессрочно"
+                lines.append(f"• {type_name}: {f1} <-> {f2} до {end_str}")
+        text = "\n".join(lines)
+        await ctx.bot.send_message(chat_id=int(uid), text=text)
+        return
+
+    if data == "adm_all_productions":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        players_map = bot_data.get("players", {})
+        if not players_map:
+            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
+            return
+        lines = ["🏭 Производство всех фракций:\n"]
+        for pid, p in players_map.items():
+            faction = p.get('faction') or 'не указана'
+            prod = p.get('production')
+            if prod:
+                prod_type = prod.get('type', 'неизвестно')
+                lines.append(f"• {faction} ({pid}): {prod_type}")
+            else:
+                lines.append(f"• {faction} ({pid}): нет")
+        text = "\n".join(lines)
+        await ctx.bot.send_message(chat_id=int(uid), text=text)
+        return
+
+    # ===== ADMIN НАСТРОЙКИ =====
+    if data == "adm_set_goods_price":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        ctx.user_data["awaiting_goods_price"] = True
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую цену за единицу товара (целое число):")
+        return
+
+    if data == "adm_set_production_time":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        ctx.user_data["awaiting_production_time"] = True
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новое время для производства в формате ЧЧ:ММ (например, 18:00):")
+        return
+
+    if data == "adm_set_government_time":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        ctx.user_data["awaiting_government_time"] = True
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новое время для формы правления в формате ЧЧ:ММ (например, 18:00):")
+        return
+
+    if data == "adm_diplomacy":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        config = bot_data.get("diplomacy_config", DEFAULT_DIPLOMACY_DURATION)
+        text = "⚙️ Настройки дипломатии (длительность в днях):\n\n"
+        text += f"🕊 Пакт о ненападении: {config.get('pact', 3)} дней\n"
+        text += f"⚔️ Война (до начала): {config.get('war', 2)} дней\n"
+        text += f"🤝 Военный союз: {config.get('military', 3)} дней\n"
+        text += f"💰 Торговый союз: {config.get('trade', 3)} дней\n\n"
+        kb = [
+            [InlineKeyboardButton("Изменить пакт", callback_data="adm_diplo_set_pact")],
+            [InlineKeyboardButton("Изменить войну", callback_data="adm_diplo_set_war")],
+            [InlineKeyboardButton("Изменить военный союз", callback_data="adm_diplo_set_military")],
+            [InlineKeyboardButton("Изменить торговый союз", callback_data="adm_diplo_set_trade")],
+            [InlineKeyboardButton("Назад", callback_data="admin_open")]
+        ]
+        await ctx.bot.send_message(chat_id=int(uid), text=text, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data == "adm_diplo_set_pact":
+        if admin_id != user.id:
+            return
+        ctx.user_data["adm_diplo_setting"] = "pact"
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность пакта о ненападении (в днях):")
+        return
+
+    if data == "adm_diplo_set_war":
+        if admin_id != user.id:
+            return
+        ctx.user_data["adm_diplo_setting"] = "war"
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность до начала войны (в днях):")
+        return
+
+    if data == "adm_diplo_set_military":
+        if admin_id != user.id:
+            return
+        ctx.user_data["adm_diplo_setting"] = "military"
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность военного союза (в днях):")
+        return
+
+    if data == "adm_diplo_set_trade":
+        if admin_id != user.id:
+            return
+        ctx.user_data["adm_diplo_setting"] = "trade"
+        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность торгового союза (в днях):")
+        return
+
+    if data == "adm_government":
+        if admin_id != user.id:
+            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            return
+        config = bot_data.get("government_config", DEFAULT_GOVERNMENT_CONFIG)
+        text = "⚙️ Текущие параметры форм правления:\n\n"
+        for gtype, params in config.items():
+            if gtype == "рабский_труд":
+                text += f"Рабский труд: людей -10, крышек +{params.get('caps_gain', 35)} в день\n"
+            elif gtype == "людские_отношения":
+                text += f"Людские отношения: людей +{params.get('people_gain', 2)} в день, крышек -{params.get('caps_cost', 25)}\n"
+            elif gtype == "трудовые_отношения":
+                text += f"Трудовые отношения: товара +{params.get('goods_bonus', 10)} в день, крышек -{params.get('caps_cost', 10)}\n"
+        kb = [
+            [InlineKeyboardButton("Изменить рабский труд", callback_data="adm_gov_edit_рабский_труд")],
+            [InlineKeyboardButton("Изменить людские отношения", callback_data="adm_gov_edit_людские_отношения")],
+            [InlineKeyboardButton("Изменить трудовые отношения", callback_data="adm_gov_edit_трудовые_отношения")],
+            [InlineKeyboardButton("Назад", callback_data="admin_open")]
+        ]
+        await ctx.bot.send_message(chat_id=int(uid), text=text, reply_markup=InlineKeyboardMarkup(kb))
+        return
+
+    if data.startswith("adm_gov_edit_"):
+        if admin_id != user.id:
+            return
+        gov_type = data.split("_", 3)[3]
+        ctx.user_data["adm_gov_editing"] = gov_type
+        if gov_type == "рабский_труд":
+            await ctx.bot.send_message(chat_id=int(uid), text="Введите новые параметры для рабского труда в формате: крышек_в_день (например: 40)")
+        elif gov_type == "людские_отношения":
+            await ctx.bot.send_message(chat_id=int(uid), text="Введите новые параметры для людских отношений в формате: людей_в_день стоимость_крышек (например: 3 30)")
+        elif gov_type == "трудовые_отношения":
+            await ctx.bot.send_message(chat_id=int(uid), text="Введите новые параметры для трудовых отношений в формате: товара_в_день стоимость_крышек (например: 15 15)")
+        return
+
+    # ===== ADMIN ВОЙСКА =====
     if data.startswith("adm_troops_"):
         if admin_id != user.id:
             await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
@@ -2380,7 +2875,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("adm_troop_item_"):
         if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
+            await ctx.bot.send_message(chat_id=int(uid), text="Тол��ко админ.")
             return
         parts = data.split("_")
         if len(parts) < 5:
@@ -2390,6 +2885,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         idx_str = parts[4]
         idx = int(idx_str)
         player = bot_data.get("players", {}).get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         troops = player.get("troops", [])
         if idx < 0 or idx >= len(troops):
             await ctx.bot.send_message(chat_id=int(uid), text="Войско не найдено.")
@@ -2431,6 +2929,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         idx_str = parts[4]
         idx = int(idx_str)
         player = bot_data.get("players", {}).get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         troops = player.get("troops", [])
         if 0 <= idx < len(troops):
             removed = troops.pop(idx)
@@ -2445,7 +2946,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=int(uid), text="Нет такого войска.")
         return
 
-    # ===== УПРАВЛЕНИЕ STORAGE/BASE/FOCUS/ACTIONS =====
+    # ===== ADMIN ХРАНИЛИЩА =====
     if data.startswith("adm_storage_") or data.startswith("adm_base_") or data.startswith("adm_focus_") or data.startswith("adm_actions_"):
         if admin_id != user.id:
             await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
@@ -2457,12 +2958,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
 
         typ = parts[1]
-        remaining = parts[2]
 
-        if remaining.startswith("item_") or remaining.startswith("add_") or remaining.startswith("edit_") or remaining.startswith("del_"):
+        if parts[2].startswith("item_") or parts[2].startswith("add_") or parts[2].startswith("edit_") or parts[2].startswith("del_"):
             pass
         else:
-            pid_str = remaining
+            pid_str = parts[2]
             player = bot_data.get("players", {}).get(pid_str)
             if not player:
                 await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
@@ -2499,6 +2999,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pid_str = parts[3]
         idx = int(parts[4])
         player = bot_data.get("players", {}).get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         coll = player.get(typ, [])
         if not (0 <= idx < len(coll)):
             await ctx.bot.send_message(chat_id=int(uid), text="Нет такого элемента.")
@@ -2553,6 +3056,9 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pid_str = parts[3]
         idx = int(parts[4])
         player = bot_data.get("players", {}).get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
+            return
         coll = player.get(typ, [])
         if 0 <= idx < len(coll):
             removed = coll.pop(idx)
@@ -2563,58 +3069,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=int(uid), text="Нет такого элемента.")
         return
 
-    # ===== УПРАВЛЕНИЕ МАГАЗИНОМ =====
-    if data == "adm_market":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-
-        market_items = bot_data.get("market_items", [])
-        if not market_items:
-            await ctx.bot.send_message(
-                chat_id=int(uid),
-                text="Магазин пуст.",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Добавить в магазин", callback_data="adm_market_add")],
-                    [InlineKeyboardButton("Назад", callback_data="admin_open")]
-                ])
-            )
-            return
-
-        text = market_message_text(market_items)
-        kb = []
-        for i, item in enumerate(market_items, 1):
-            kb.append([InlineKeyboardButton(f"Удалить #{i}", callback_data=f"adm_market_del_{i - 1}")])
-        kb.append([InlineKeyboardButton("Добавить в магазин", callback_data="adm_market_add")])
-        kb.append([InlineKeyboardButton("Назад", callback_data="admin_open")])
-
-        await ctx.bot.send_message(chat_id=int(uid), text=text, reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    if data == "adm_market_add":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        ctx.user_data["awaiting_market_item"] = True
-        await ctx.bot.send_message(chat_id=int(uid), text="Введи текст для добавления в магазин:")
-        return
-
-    if data.startswith("adm_market_del_"):
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        idx = int(data.split("_", 3)[3])
-        market_items = bot_data.get("market_items", [])
-        if 0 <= idx < len(market_items):
-            removed = market_items.pop(idx)
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=int(uid), text=f"Элемент '{removed}' удален из магазина.")
-            add_log(ctx, f"Админ {user.first_name} удалил из магазина: {removed}")
-        else:
-            await ctx.bot.send_message(chat_id=int(uid), text="Нет такого элемента.")
-        return
-
-    # ===== УПРАВЛЕНИЕ ЛАВКОЙ =====
+    # ===== ADMIN ЛАВКА =====
     if data == "adm_shop":
         if admin_id != user.id:
             await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
@@ -2679,7 +3134,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=int(uid), text="Введи новое значение: Название Цена")
         return
 
-    # ===== ЛОГИ =====
+    # ===== ADMIN ЛОГИ =====
     if data and data.startswith("adm_logs_"):
         if admin_id != user.id:
             await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
@@ -2732,307 +3187,15 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         add_log(ctx, f"Админ {user.first_name} очистил логи")
         return
 
-    # ===== ОТПРАВКА ХОДА ИГРОКУ =====
-    if data == "adm_send_turn":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-
-        players_map = bot_data.get("players", {})
-        if not players_map:
-            await ctx.bot.send_message(chat_id=int(uid), text="Игроков пока нет.")
-            return
-
-        kb = []
-        for pid_str, info in players_map.items():
-            faction = info.get('faction', 'не указана')
-            label = f"{info.get('first_name') or '-'} ({faction})"
-            kb.append([InlineKeyboardButton(label[:60], callback_data=f"adm_send_turn_to_{pid_str}")])
-        kb.append([InlineKeyboardButton("Назад", callback_data="admin_open")])
-
-        await ctx.bot.send_message(chat_id=int(uid), text="Выбери игрока для отправки хода:",
-                                   reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    if data.startswith("adm_send_turn_to_"):
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-
-        pid_str = data.split("_", 4)[4]
-        player = bot_data.get("players", {}).get(pid_str)
-        if not player:
-            await ctx.bot.send_message(chat_id=int(uid), text="Игрок не найден.")
-            return
-
-        faction = player.get('faction', 'не указана')
-        player_name = player.get('first_name', 'Игрок')
-
-        kb = [
-            [InlineKeyboardButton("Отправить сразу", callback_data=f"adm_send_immediately_{pid_str}")],
-            [InlineKeyboardButton("Назад", callback_data="adm_send_turn")]
-        ]
-
-        await ctx.bot.send_message(
-            chat_id=int(uid),
-            text=f"Выбран игрок: {player_name} (Фракция: {faction})\nВыбери тип отправки:",
-            reply_markup=InlineKeyboardMarkup(kb)
-        )
-        return
-
-    if data.startswith("adm_send_immediately_"):
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-
-        pid_str = data.split("_", 3)[3]
-        ctx.user_data["awaiting_turn_message"] = {"player_id": pid_str}
-        await ctx.bot.send_message(chat_id=int(uid), text="Введи сообщение для отправки:")
-        return
-
-    # ===== ВСЕ ВОЙСКА =====
-    if data == "adm_all_troops":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-
-        players_map = bot_data.get("players", {})
-        if not players_map:
-            await ctx.bot.send_message(chat_id=int(uid), text="Игроков пока нет.")
-            return
-
-        troops_info = "⚔️ Войска всех фракций:\n\n"
-
-        for pid_str, player in players_map.items():
-            faction = player.get('faction', 'не указана')
-            player_name = player.get('first_name', 'Неизвестный')
-            troops = player.get('troops', [])
-
-            troops_info += f"🏴 {player_name} ({faction}):\n"
-            if troops:
-                total_troops = sum(troop.get('qty', 0) for troop in troops)
-                troops_info += f"  Всего войск: {total_troops}\n"
-                for troop in troops:
-                    troops_info += f"  • {troop['name']}: {troop['qty']}\n"
-            else:
-                troops_info += "  Нет войск\n"
-            troops_info += "\n"
-
-        if len(troops_info) > 4000:
-            parts = [troops_info[i:i + 4000] for i in range(0, len(troops_info), 4000)]
-            for part in parts:
-                await ctx.bot.send_message(chat_id=int(uid), text=part)
+    if data == "adm_logout":
+        if bot_data.get("ADMIN_ID") == user.id:
+            bot_data["ADMIN_ID"] = None
+            save_data(ctx)
+            await ctx.bot.send_message(chat_id=int(uid), text="Вы вышли из админки.")
         else:
-            await ctx.bot.send_message(chat_id=int(uid), text=troops_info)
-
-        kb = [[InlineKeyboardButton("Назад", callback_data="admin_open")]]
-        await ctx.bot.send_message(chat_id=int(uid), text="Выбери действие:", reply_markup=InlineKeyboardMarkup(kb))
+            await ctx.bot.send_message(chat_id=int(uid), text="Ты не админ.")
         return
 
-    # ===== ВСЕ ТОВАРЫ =====
-    if data == "adm_all_goods":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        players_map = bot_data.get("players", {})
-        if not players_map:
-            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
-            return
-        lines = ["📦 Товары всех фракций:\n"]
-        for pid, p in players_map.items():
-            faction = p.get('faction') or 'не указана'
-            goods = p.get('goods', 0)
-            lines.append(f"• {faction} ({pid}): {goods} ед.")
-        text = "\n".join(lines)
-        await ctx.bot.send_message(chat_id=int(uid), text=text)
-        return
-
-    # ===== ВСЕ ФОРМЫ ПРАВЛЕНИЯ =====
-    if data == "adm_all_governments":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        players_map = bot_data.get("players", {})
-        if not players_map:
-            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
-            return
-        lines = ["🏛 Формы правления всех фракций:\n"]
-        for pid, p in players_map.items():
-            faction = p.get('faction') or 'не указана'
-            gov = p.get('government')
-            if gov:
-                gov_type = gov.get('type', 'неизвестно')
-                lines.append(f"• {faction} ({pid}): {gov_type}")
-            else:
-                lines.append(f"• {faction} ({pid}): нет")
-        text = "\n".join(lines)
-        await ctx.bot.send_message(chat_id=int(uid), text=text)
-        return
-
-    # ===== ВСЕ ДОГОВОРЫ =====
-    if data == "adm_all_treaties":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        treaties = bot_data.get("active_treaties", {})
-        if not treaties:
-            await ctx.bot.send_message(chat_id=int(uid), text="Нет активных договоров.")
-            return
-        lines = ["🤝 Все активные дипломатические договоры:\n"]
-        for tid, t in treaties.items():
-            f1, f2 = t.get("factions", ["?", "?"])
-            type_name = {
-                "pact": "Пакт о ненападении",
-                "war": "Война" + (" (ожидание)" if t.get("pending") else ""),
-                "military": "Военный союз",
-                "trade": "Торговый союз"
-            }.get(t.get("type"), t.get("type"))
-            if t.get("pending"):
-                start_after = t.get("start_after", 0)
-                start_str = time.ctime(start_after) if start_after else "скоро"
-                lines.append(f"• {type_name}: {f1} <-> {f2} (начнётся {start_str})")
-            else:
-                end_str = time.ctime(t.get("end", 0)) if t.get("end") else "бессрочно"
-                lines.append(f"• {type_name}: {f1} <-> {f2} до {end_str}")
-        text = "\n".join(lines)
-        await ctx.bot.send_message(chat_id=int(uid), text=text)
-        return
-
-    # ===== ВСЕ ПРОИЗВОДСТВА =====
-    if data == "adm_all_productions":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        players_map = bot_data.get("players", {})
-        if not players_map:
-            await ctx.bot.send_message(chat_id=int(uid), text="Нет игроков.")
-            return
-        lines = ["🏭 Производство всех фракций:\n"]
-        for pid, p in players_map.items():
-            faction = p.get('faction') or 'не указана'
-            prod = p.get('production')
-            if prod:
-                prod_type = prod.get('type', 'неизвестно')
-                lines.append(f"• {faction} ({pid}): {prod_type}")
-            else:
-                lines.append(f"• {faction} ({pid}): нет")
-        text = "\n".join(lines)
-        await ctx.bot.send_message(chat_id=int(uid), text=text)
-        return
-
-    # ===== УСТАНОВКА ЦЕНЫ ТОВАРА =====
-    if data == "adm_set_goods_price":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        ctx.user_data["awaiting_goods_price"] = True
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую цену за едини��у товара (целое число):")
-        return
-
-    # ===== УСТАНОВКА ВРЕМЕНИ ПРОИЗВОДСТВА =====
-    if data == "adm_set_production_time":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        ctx.user_data["awaiting_production_time"] = True
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новое время для производства в формате ЧЧ:ММ (например, 18:00):")
-        return
-
-    # ===== УСТАНОВКА ВРЕМЕНИ ФОРМЫ ПРАВЛЕНИЯ =====
-    if data == "adm_set_government_time":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        ctx.user_data["awaiting_government_time"] = True
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новое время для формы правления в формате ЧЧ:ММ (например, 18:00):")
-        return
-
-    # ===== УПРАВЛЕНИЕ ДИПЛОМАТИЕЙ =====
-    if data == "adm_diplomacy":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        config = bot_data.get("diplomacy_config", DEFAULT_DIPLOMACY_DURATION)
-        text = "⚙️ Настройки дипломатии (длительность в днях):\n\n"
-        text += f"🕊 Пакт о ненападении: {config.get('pact', 3)} дней\n"
-        text += f"⚔️ Война (до начала): {config.get('war', 2)} дней\n"
-        text += f"🤝 Военный союз: {config.get('military', 3)} дней\n"
-        text += f"💰 Торговый союз: {config.get('trade', 3)} дней\n\n"
-        kb = [
-            [InlineKeyboardButton("Изменить пакт", callback_data="adm_diplo_set_pact")],
-            [InlineKeyboardButton("Изменить войну", callback_data="adm_diplo_set_war")],
-            [InlineKeyboardButton("Изменить военный союз", callback_data="adm_diplo_set_military")],
-            [InlineKeyboardButton("Изменить торговый союз", callback_data="adm_diplo_set_trade")],
-            [InlineKeyboardButton("Назад", callback_data="admin_open")]
-        ]
-        await ctx.bot.send_message(chat_id=int(uid), text=text, reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    if data == "adm_diplo_set_pact":
-        if admin_id != user.id:
-            return
-        ctx.user_data["adm_diplo_setting"] = "pact"
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность пакта о ненападении (в днях):")
-        return
-
-    if data == "adm_diplo_set_war":
-        if admin_id != user.id:
-            return
-        ctx.user_data["adm_diplo_setting"] = "war"
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность до начала войны (в днях):")
-        return
-
-    if data == "adm_diplo_set_military":
-        if admin_id != user.id:
-            return
-        ctx.user_data["adm_diplo_setting"] = "military"
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность военного союза (в днях):")
-        return
-
-    if data == "adm_diplo_set_trade":
-        if admin_id != user.id:
-            return
-        ctx.user_data["adm_diplo_setting"] = "trade"
-        await ctx.bot.send_message(chat_id=int(uid), text="Введите новую длительность торгового союза (в днях):")
-        return
-
-    # ===== УПРАВЛЕНИЕ ФОРМАМИ ПРАВЛЕНИЯ =====
-    if data == "adm_government":
-        if admin_id != user.id:
-            await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
-            return
-        config = bot_data.get("government_config", DEFAULT_GOVERNMENT_CONFIG)
-        text = "⚙️ Текущие параметры форм правления:\n\n"
-        for gtype, params in config.items():
-            if gtype == "рабский_труд":
-                text += f"Рабский труд: людей -10, крышек +{params.get('caps_gain', 35)} в день\n"
-            elif gtype == "людские_отношения":
-                text += f"Людские отношения: людей +{params.get('people_gain', 2)} в день, крышек -{params.get('caps_cost', 25)}\n"
-            elif gtype == "трудовые_отношения":
-                text += f"Трудовые отношения: товара +{params.get('goods_bonus', 10)} в день, крышек -{params.get('caps_cost', 10)}\n"
-        kb = [
-            [InlineKeyboardButton("Изменить рабский труд", callback_data="adm_gov_edit_рабский_труд")],
-            [InlineKeyboardButton("Изменить людские отношения", callback_data="adm_gov_edit_людские_отношения")],
-            [InlineKeyboardButton("Изменить трудовые отношения", callback_data="adm_gov_edit_трудовые_отношения")],
-            [InlineKeyboardButton("Назад", callback_data="admin_open")]
-        ]
-        await ctx.bot.send_message(chat_id=int(uid), text=text, reply_markup=InlineKeyboardMarkup(kb))
-        return
-
-    if data.startswith("adm_gov_edit_"):
-        if admin_id != user.id:
-            return
-        gov_type = data.split("_", 3)[3]
-        ctx.user_data["adm_gov_editing"] = gov_type
-        if gov_type == "рабский_труд":
-            await ctx.bot.send_message(chat_id=int(uid), text="Введите новые параметры для рабского труда в формате: крышек_в_день (например: 40)")
-        elif gov_type == "людские_отношения":
-            await ctx.bot.send_message(chat_id=int(uid), text="Введите новые параметры для людских отношений в формате: людей_в_день стоимость_крышек (например: 3 30)")
-        elif gov_type == "трудовые_отношения":
-            await ctx.bot.send_message(chat_id=int(uid), text="Введите новые параметры для трудовых отношений в формате: товара_в_день стоимость_крышек (например: 15 15)")
-        return
-
-    # ===== ПЛАНОВЫЕ ВЫПЛАТЫ =====
     if data == "adm_scheduled_payments":
         if admin_id != user.id:
             await ctx.bot.send_message(chat_id=int(uid), text="Только админ.")
@@ -3059,7 +3222,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         kb = [
             [InlineKeyboardButton("💰 Плановая выплата крышек", callback_data=f"adm_sched_pay_caps_{pid_str}")],
             [InlineKeyboardButton("📦 Плановая выплата товара", callback_data=f"adm_sched_pay_goods_{pid_str}")],
-            [InlineKeyboardButton("Отменить вып��ату крышек", callback_data=f"adm_sched_cancel_caps_{pid_str}")],
+            [InlineKeyboardButton("Отменить выплату крышек", callback_data=f"adm_sched_cancel_caps_{pid_str}")],
             [InlineKeyboardButton("Отменить выплату товара", callback_data=f"adm_sched_cancel_goods_{pid_str}")],
             [InlineKeyboardButton("Назад", callback_data="adm_scheduled_payments")]
         ]
@@ -3072,7 +3235,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pid_str = data.split("_", 4)[4]
         ctx.user_data["adm_sched_pay_caps"] = pid_str
         await ctx.bot.send_message(chat_id=int(uid),
-                                   text=f"Введите количество крышек для ежедневной выплаты игроку {pid_str} (может быть отрицательным):")
+                                   text=f"Введите количество крышек для ежедневной выпла��ы игроку {pid_str} (может быть отрицательным):")
         return
 
     if data.startswith("adm_sched_pay_goods_"):
@@ -3108,21 +3271,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
         return
 
-    if data == "adm_logout":
-        if bot_data.get("ADMIN_ID") == user.id:
-            bot_data["ADMIN_ID"] = None
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=int(uid), text="Вы вышли из админки.")
-        else:
-            await ctx.bot.send_message(chat_id=int(uid), text="Ты не админ.")
-        return
-
     if data == "noop":
         await query.answer()
         return
 
     await ctx.bot.send_message(chat_id=int(uid), text="Неизвестная кнопка или функция в разработке.")
-    # ============= TEXT HANDLER =============
+    # ===== TEXT HANDLER =====
 async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
@@ -3134,7 +3288,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     job_queue = ctx.application.job_queue
     admin_id = bot_data.get("ADMIN_ID")
 
-    # ===== ОТПРАВКА ХОДА =====
+    # ===== ОТПРАВК�� ХОДА =====
     if ctx.user_data.get("awaiting_turn_message") and uid == admin_id:
         turn_info = ctx.user_data.pop("awaiting_turn_message")
         target_pid = turn_info["player_id"]
@@ -3297,7 +3451,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=uid, text="Ошибка формата. Используй: Название Кол-во")
         return
 
-    # ===== ДОБАВЛЕНИЕ В СКЛАД/БАЗУ/ФОКУС/ХОД =====
+    # ===== ДОБАВЛЕНИЕ ХРАНИЛИЩА =====
     if ctx.user_data.get("adding_storage"):
         players.setdefault(pid, {}).setdefault("storage", []).append(text)
         await ctx.bot.send_message(chat_id=uid, text="Запись добавлена в склад.")
@@ -3306,6 +3460,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("adding_storage", None)
         return
 
+    # ===== ДОБАВЛЕНИЕ БАЗЫ =====
     if ctx.user_data.get("adding_base"):
         players.setdefault(pid, {}).setdefault("base", []).append(text)
         await ctx.bot.send_message(chat_id=uid, text="Запись добавлена в базу.")
@@ -3314,6 +3469,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("adding_base", None)
         return
 
+    # ===== ДОБАВЛЕНИЕ ФОКУСА =====
     if ctx.user_data.get("adding_focus"):
         players.setdefault(pid, {}).setdefault("focus", []).append(text)
         await ctx.bot.send_message(chat_id=uid, text="Запись добавлена в фокус.")
@@ -3322,8 +3478,10 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("adding_focus", None)
         return
 
+    # ===== ДОБАВЛЕНИЕ ХОДА ДЕЙСТВИЙ =====
     if ctx.user_data.get("adding_actions"):
         players.setdefault(pid, {}).setdefault("actions", []).append(text)
+        admin_id = bot_data.get("ADMIN_ID")
         if admin_id:
             try:
                 player_name = players.get(pid, {}).get('first_name', 'Неизвестный игрок')
@@ -3340,7 +3498,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop("adding_actions", None)
         return
 
-    # ===== РЕДАКТИРОВАНИЕ STORAGE/BASE/FOCUS/ACTIONS =====
+    # ===== РЕДАКТИРОВАНИЕ ХРАНИЛИЩА =====
     if ctx.user_data.get("editing_storage"):
         idx = ctx.user_data.pop("editing_storage")
         player = players.get(pid)
@@ -3357,6 +3515,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=uid, text="Элемент склада изменён.")
         return
 
+    # ===== РЕДАКТИРОВАНИЕ БАЗЫ =====
     if ctx.user_data.get("editing_base"):
         idx = ctx.user_data.pop("editing_base")
         player = players.get(pid)
@@ -3373,6 +3532,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=uid, text="Элемент базы изменён.")
         return
 
+    # ===== РЕДАКТИРОВАНИЕ ФОКУСА =====
     if ctx.user_data.get("editing_focus"):
         idx = ctx.user_data.pop("editing_focus")
         player = players.get(pid)
@@ -3389,6 +3549,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=uid, text="Элемент фокуса изменён.")
         return
 
+    # ===== РЕДАКТИРОВАНИЕ ХОДА =====
     if ctx.user_data.get("editing_actions"):
         idx = ctx.user_data.pop("editing_actions")
         player = players.get(pid)
@@ -3405,7 +3566,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await ctx.bot.send_message(chat_id=uid, text="Запись хода действий изменена.")
         return
 
-    # ===== АДМИН: ВЫДАЧА/ОТЪЁМ КРЫШЕК =====
+    # ===== АДМИН: ВЫДАЧА/ОТНЯТИЕ КРЫШЕК =====
     if ctx.user_data.get("awaiting_admin_amount") and uid == admin_id:
         info = ctx.user_data.pop("awaiting_admin_amount")
         mode = info.get("mode")
@@ -3608,7 +3769,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=uid, text="Ошибка формата. Используй: Название Кол-во")
         return
 
-    # ===== АДМИН: ДОБАВЛЕНИЕ ITEM В STORAGE/BASE/FOCUS/ACTIONS =====
+    # ===== АДМИН: ДОБАВЛЕНИЕ/РЕДАКТИРОВАНИЕ ЭЛЕМЕНТОВ =====
     if ctx.user_data.get("awaiting_admin_add_item") and uid == admin_id:
         info = ctx.user_data.pop("awaiting_admin_add_item")
         target = info.get("target")
@@ -3619,7 +3780,6 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         save_data(ctx)
         return
 
-    # ===== АДМИН: РЕДАКТИРОВАНИЕ ITEM В STORAGE/BASE/FOCUS/ACTIONS =====
     if ctx.user_data.get("awaiting_admin_edit_item") and uid == admin_id:
         info = ctx.user_data.pop("awaiting_admin_edit_item")
         target = info.get("target")
@@ -3748,7 +3908,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
             return
 
-    # ===== НАЛОГ НА СДЕЛКУ =====
+    # ===== ТОРГОВЛЯ: НАЛОГ =====
     if ctx.user_data.get("awaiting_tax"):
         deal_id = ctx.user_data.get("deal_id")
         deal = None
@@ -3880,7 +4040,15 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not player:
                 await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
                 return
-            settlement = player.get("settlement", {})
+            
+            settlements = player.get("settlements", [])
+            idx = ctx.user_data.get("current_settlement_idx", 0)
+            if idx < 0 or idx >= len(settlements):
+                await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+                ctx.user_data.pop("settlement_withdraw_amount", None)
+                return
+            
+            settlement = settlements[idx]
             balance = settlement.get("balance", 0)
             if balance < amount:
                 await ctx.bot.send_message(chat_id=uid, text=f"На поселении недостаточно крышек. Баланс: {balance}.")
@@ -3892,10 +4060,10 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             save_data(ctx)
             
             await ctx.bot.send_message(chat_id=uid,
-                                       text=f"✅ Вы сняли {amount} крышек с поселения.\n"
+                                       text=f"✅ Вы сняли {amount} крышек с поселения '{settlement.get('name')}'.\n"
                                             f"Баланс поселения: {settlement['balance']}\n"
                                             f"Ваш баланс: {player['caps']}")
-            add_log(ctx, f"Игрок {user.first_name} снял {amount} крышек с поселения")
+            add_log(ctx, f"Игрок {user.first_name} снял {amount} крышек с поселения {settlement.get('name')}")
         except ValueError:
             await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
         ctx.user_data.pop("settlement_withdraw_amount", None)
@@ -3912,6 +4080,15 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not player:
                 await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
                 return
+            
+            settlements = player.get("settlements", [])
+            idx = ctx.user_data.get("current_settlement_idx", 0)
+            if idx < 0 or idx >= len(settlements):
+                await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+                ctx.user_data.pop("settlement_deposit_amount", None)
+                return
+            
+            settlement = settlements[idx]
             caps = player.get("caps", 0)
             if caps < amount:
                 await ctx.bot.send_message(chat_id=uid, text=f"У вас недостаточно крышек. Баланс: {caps}.")
@@ -3919,90 +4096,248 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 return
             
             player["caps"] -= amount
-            settlement = player.get("settlement", {})
             settlement["balance"] = settlement.get("balance", 0) + amount
             save_data(ctx)
             
             await ctx.bot.send_message(chat_id=uid,
-                                       text=f"✅ Вы добавили {amount} крышек на поселение.\n"
+                                       text=f"✅ Вы добавили {amount} крышек на поселение '{settlement.get('name')}'.\n"
                                             f"Ваш баланс: {player['caps']}\n"
                                             f"Баланс поселения: {settlement['balance']}")
-            add_log(ctx, f"Игрок {user.first_name} добавил {amount} крышек на поселение")
+            add_log(ctx, f"Игрок {user.first_name} добавил {amount} крышек на поселение {settlement.get('name')}")
         except ValueError:
             await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
         ctx.user_data.pop("settlement_deposit_amount", None)
         return
 
-    # ===== АДМИН: ЦЕНА ТОВАРА =====
-    if ctx.user_data.get("awaiting_goods_price") and uid == admin_id:
+    # ===== АДМИН: СОЗДАНИЕ ПОСЕЛЕНИЯ =====
+    if ctx.user_data.get("adm_set_create") and uid == admin_id:
+        pid_str = ctx.user_data.pop("adm_set_create")
+        player = players.get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
+            return
+        
+        settlements = player.get("settlements", [])
+        new_settlement = {
+            "name": text,
+            "population": 0,
+            "daily_income": 0,
+            "balance": 0
+        }
+        settlements.append(new_settlement)
+        save_data(ctx)
+        
+        await ctx.bot.send_message(chat_id=uid, text=f"✅ Поселение '{text}' создано для игрока {pid_str}.")
         try:
-            price = int(text)
-            if price <= 0:
-                await ctx.bot.send_message(chat_id=uid, text="Цена должна быть положительной.")
-                return
-            bot_data["goods_price"] = price
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Цена за единицу товара установлена: {price} крышек.")
+            await ctx.bot.send_message(chat_id=int(pid_str), text=f"✅ Админ создал вам новое поселение: '{text}'.")
+        except:
+            pass
+        add_log(ctx, f"Админ {user.first_name} создал поселение '{text}' для игрока {pid_str}.")
+        return
 
-            players_map = bot_data.get("players", {})
-            for pid_str in players_map:
-                try:
-                    await ctx.bot.send_message(
-                        chat_id=int(pid_str),
-                        text=f"💰 Цена за единицу товара изменена. Теперь она составляет {price} крышек."
-                    )
-                except:
-                    pass
-            add_log(ctx, f"Админ {user.first_name} установил глобальную цену товара: {price}")
+    # ===== АДМИН: РЕДАКТИРОВАНИЕ НАЗВАНИЯ ПОСЕЛЕНИЯ =====
+    if ctx.user_data.get("adm_set_edit_name") and uid == admin_id:
+        pid_str, set_idx = ctx.user_data.pop("adm_set_edit_name")
+        player = players.get(pid_str)
+        if not player:
+            await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
+            return
+        
+        settlements = player.get("settlements", [])
+        if set_idx < 0 or set_idx >= len(settlements):
+            await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+            return
+        
+        settlements[set_idx]["name"] = text
+        save_data(ctx)
+        
+        await ctx.bot.send_message(chat_id=uid, text=f"✅ Название поселения изменено на: {text}")
+        try:
+            await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ изменил название вашего поселения на: {text}")
+        except:
+            pass
+        return
+
+    # ===== АДМИН: ДОБАВЛЕНИЕ НАСЕЛЕНИЯ =====
+    if ctx.user_data.get("adm_set_add_pop") and uid == admin_id:
+        pid_str, set_idx = ctx.user_data.pop("adm_set_add_pop")
+        try:
+            qty = int(text)
+            if qty <= 0:
+                await ctx.bot.send_message(chat_id=uid, text="Количество должно быть положительным.")
+                return
+            
+            player = players.get(pid_str)
+            if not player:
+                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
+                return
+            
+            settlements = player.get("settlements", [])
+            if set_idx < 0 or set_idx >= len(settlements):
+                await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+                return
+            
+            settlements[set_idx]["population"] = settlements[set_idx].get("population", 0) + qty
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Население поселения увеличено на {qty}. Новое население: {settlements[set_idx]['population']}")
+            try:
+                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ добавил {qty} человек в ваше поселение. Население: {settlements[set_idx]['population']}")
+            except:
+                pass
         except ValueError:
             await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
-        ctx.user_data.pop("awaiting_goods_price", None)
         return
 
-    # ===== АДМИН: ВРЕМЯ ПРОИЗВОДСТВА =====
-    if ctx.user_data.get("awaiting_production_time") and uid == admin_id:
+    # ===== АДМИН: УДАЛЕНИЕ Н��СЕЛЕНИЯ =====
+    if ctx.user_data.get("adm_set_remove_pop") and uid == admin_id:
+        pid_str, set_idx = ctx.user_data.pop("adm_set_remove_pop")
+        try:
+            qty = int(text)
+            if qty <= 0:
+                await ctx.bot.send_message(chat_id=uid, text="Количество должно быть положительным.")
+                return
+            
+            player = players.get(pid_str)
+            if not player:
+                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
+                return
+            
+            settlements = player.get("settlements", [])
+            if set_idx < 0 or set_idx >= len(settlements):
+                await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+                return
+            
+            current_pop = settlements[set_idx].get("population", 0)
+            if current_pop < qty:
+                await ctx.bot.send_message(chat_id=uid, text=f"В поселении только {current_pop} человек.")
+                return
+            
+            settlements[set_idx]["population"] = current_pop - qty
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Население поселения уменьшено на {qty}. Новое население: {settlements[set_idx]['population']}")
+            try:
+                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ забрал {qty} человек из вашего поселения. Население: {settlements[set_idx]['population']}")
+            except:
+                pass
+        except ValueError:
+            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
+        return
+
+    # ===== АДМИН: УСТАНОВКА ДОХОДА =====
+    if ctx.user_data.get("adm_set_set_income") and uid == admin_id:
+        pid_str, set_idx = ctx.user_data.pop("adm_set_set_income")
+        try:
+            income = int(text)
+            player = players.get(pid_str)
+            if not player:
+                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
+                return
+            
+            settlements = player.get("settlements", [])
+            if set_idx < 0 or set_idx >= len(settlements):
+                await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+                return
+            
+            settlements[set_idx]["daily_income"] = income
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Ежедневный доход/налог поселения установлен: {income} крышек")
+            try:
+                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ установил ежедневный доход вашего поселения: {income} крышек")
+            except:
+                pass
+        except ValueError:
+            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
+        return
+
+    # ===== АДМИН: ДОБАВЛЕНИЕ КРЫШЕК ПОСЕЛЕНИЮ =====
+    if ctx.user_data.get("adm_set_add_balance") and uid == admin_id:
+        pid_str, set_idx = ctx.user_data.pop("adm_set_add_balance")
+        try:
+            amount = int(text)
+            if amount <= 0:
+                await ctx.bot.send_message(chat_id=uid, text="Сумма должна быть положительной.")
+                return
+            
+            player = players.get(pid_str)
+            if not player:
+                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
+                return
+            
+            settlements = player.get("settlements", [])
+            if set_idx < 0 or set_idx >= len(settlements):
+                await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+                return
+            
+            settlements[set_idx]["balance"] = settlements[set_idx].get("balance", 0) + amount
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ На баланс поселения добавлено {amount} крышек. Новый баланс: {settlements[set_idx]['balance']}")
+            try:
+                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ добавил {amount} крышек на баланс вашего поселения. Баланс: {settlements[set_idx]['balance']}")
+            except:
+                pass
+        except ValueError:
+            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
+        return
+
+    # ===== АДМИН: УДАЛЕНИЕ КРЫШЕК ПОСЕЛЕНИЯ =====
+    if ctx.user_data.get("adm_set_remove_balance") and uid == admin_id:
+        pid_str, set_idx = ctx.user_data.pop("adm_set_remove_balance")
+        try:
+            amount = int(text)
+            if amount <= 0:
+                await ctx.bot.send_message(chat_id=uid, text="Сумма должна быть положительной.")
+                return
+            
+            player = players.get(pid_str)
+            if not player:
+                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
+                return
+            
+            settlements = player.get("settlements", [])
+            if set_idx < 0 or set_idx >= len(settlements):
+                await ctx.bot.send_message(chat_id=uid, text="Поселение не найдено.")
+                return
+            
+            current_balance = settlements[set_idx].get("balance", 0)
+            if current_balance < amount:
+                await ctx.bot.send_message(chat_id=uid, text=f"На балансе поселения только {current_balance} крышек.")
+                return
+            
+            settlements[set_idx]["balance"] = current_balance - amount
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ С баланса поселения снято {amount} крышек. Новый баланс: {settlements[set_idx]['balance']}")
+            try:
+                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ снял {amount} крышек с баланса вашего поселения. Баланс: {settlements[set_idx]['balance']}")
+            except:
+                pass
+        except ValueError:
+            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
+        return
+
+    # ===== АДМИН: УСТАНОВКА ВРЕМЕНИ ДОХОДА =====
+    if ctx.user_data.get("adm_set_set_time") and uid == admin_id:
+        pid_str, set_idx = ctx.user_data.pop("adm_set_set_time")
         try:
             hour, minute = map(int, text.split(':'))
             if not (0 <= hour <= 23 and 0 <= minute <= 59):
                 raise ValueError
+            
             time_str = f"{hour:02d}:{minute:02d}"
-            bot_data["production_time"] = time_str
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Время производства установлено: {time_str}.")
-
-            players_map = bot_data.get("players", {})
-            for pid_str, player in players_map.items():
-                prod = player.get("production")
-                if prod:
-                    cancel_production_job(job_queue, pid_str)
-                    schedule_production_job(job_queue, pid_str, prod["type"], dt_time(hour, minute))
-            add_log(ctx, f"Админ {user.first_name} изменил время производства на {time_str}")
+            if job_queue:
+                schedule_settlement_income(job_queue, pid_str, set_idx, dt_time(hour, minute))
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Время ежедневного дохода поселения установлено: {time_str}")
+            try:
+                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ установил время ежедневного дохода вашего поселения: {time_str}")
+            except:
+                pass
         except:
-            await ctx.bot.send_message(chat_id=uid, text="Неверный формат. Используйте ЧЧ:ММ (например, 18:00).")
-        ctx.user_data.pop("awaiting_production_time", None)
-        return
-
-    # ===== АДМИН: ВРЕМЯ ФОРМЫ ПРАВЛЕНИЯ =====
-    if ctx.user_data.get("awaiting_government_time") and uid == admin_id:
-        try:
-            hour, minute = map(int, text.split(':'))
-            if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                raise ValueError
-            time_str = f"{hour:02d}:{minute:02d}"
-            bot_data["government_time"] = time_str
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Время формы правления установлено: {time_str}.")
-
-            players_map = bot_data.get("players", {})
-            for pid_str, player in players_map.items():
-                gov = player.get("government")
-                if gov:
-                    cancel_government_job(job_queue, pid_str)
-                    schedule_government_job(job_queue, pid_str, gov["type"], dt_time(hour, minute))
-            add_log(ctx, f"Админ {user.first_name} изменил время формы правления на {time_str}")
-        except:
-            await ctx.bot.send_message(chat_id=uid, text="Неверный формат. Используйте ЧЧ:ММ (например, 18:00).")
-        ctx.user_data.pop("awaiting_government_time", None)
+            await ctx.bot.send_message(chat_id=uid, text="Неверный формат. Используйте ЧЧ:ММ (например, 09:00).")
         return
 
     # ===== АДМИН: РЕДАКТИРОВАНИЕ ПРОИЗВОДСТВА =====
@@ -4012,28 +4347,34 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not player:
             await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
             return
+        
         parts = text.split()
         if len(parts) != 2:
             await ctx.bot.send_message(chat_id=uid, text="Неверный формат. Введите: тип_труда количество_людей")
             return
+        
         prod_type = parts[0].lower()
         try:
             people = int(parts[1])
         except:
             await ctx.bot.send_message(chat_id=uid, text="Количество людей должно быть числом.")
             return
+        
         if prod_type not in PRODUCTION_TYPES:
             await ctx.bot.send_message(chat_id=uid,
                                        text="Неверный тип труда. Доступны: легкий, средний, тяжелый, усиленный.")
             return
+        
         if player.get("production"):
             await remove_production(player, pid_str, ctx)
+        
         troops = player.get("troops", [])
         people_troop = None
         for t in troops:
             if t["name"].lower() == "люди":
                 people_troop = t
                 break
+        
         if people_troop:
             if people_troop["qty"] < people:
                 await ctx.bot.send_message(chat_id=uid,
@@ -4043,15 +4384,17 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await ctx.bot.send_message(chat_id=uid, text="У игрока нет людей.")
             return
+        
         player["production"] = {"type": prod_type, "people_used": people}
         save_data(ctx)
+        
         if job_queue:
             try:
                 prod_time_str = bot_data.get("production_time", "18:00")
                 hour, minute = map(int, prod_time_str.split(':'))
                 schedule_production_job(job_queue, pid_str, prod_type, dt_time(hour, minute))
                 await ctx.bot.send_message(chat_id=uid,
-                                           text=f"Производство для игрока {pid_str} установлено: {prod_type}, занято {people} людей. Запланировано на {hour:02d}:{minute:02d} ежедневно.")
+                                           text=f"✅ Производство для игрока {pid_str} установлено: {prod_type}, занято {people} людей. Запланировано на {hour:02d}:{minute:02d} ежедневно.")
             except Exception as e:
                 logger.error(f"Ошибка планирования производства для {pid_str}: {e}")
                 await ctx.bot.send_message(chat_id=uid,
@@ -4059,10 +4402,11 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await ctx.bot.send_message(chat_id=uid,
                                        text="⚠️ Производство установлено, но автоматическое получение продукции невозможно из-за отсутствия планировщика.")
+        
         add_log(ctx, f"Админ {user.first_name} установил производство игроку {pid_str}: {prod_type} ({people} чел)")
         return
 
-    # ===== АДМИН: ДИПЛОМАТИЯ НАСТРОЙКИ =====
+    # ===== АДМИН: ДИПЛОМАТИЯ =====
     if ctx.user_data.get("adm_diplo_setting") and uid == admin_id:
         setting = ctx.user_data.pop("adm_diplo_setting")
         try:
@@ -4070,9 +4414,11 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if days <= 0:
                 await ctx.bot.send_message(chat_id=uid, text="Длительность должна быть положительной.")
                 return
+            
             bot_data["diplomacy_config"][setting] = days
             save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Длительность {setting} установлена: {days} дней.")
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Длительность {setting} установлена: {days} дней.")
             add_log(ctx, f"Админ {user.first_name} изменил длительность {setting} на {days}")
         except ValueError:
             await ctx.bot.send_message(chat_id=uid, text="Введите число.")
@@ -4111,196 +4457,96 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await ctx.bot.send_message(chat_id=uid, text="Значения должны быть положительными.")
                     return
                 config[gov_type] = {"goods_bonus": goods, "caps_cost": cost}
+            
             save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Параметры {gov_type} обновлены.")
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Параметры {gov_type} обновлены.")
             add_log(ctx, f"Админ {user.first_name} изменил параметры {gov_type} на {text}")
         except ValueError:
             await ctx.bot.send_message(chat_id=uid, text="Ошибка ввода. Проверьте формат.")
         return
 
-    # ===== АДМИН: СОЗДАНИЕ ПОСЕЛЕНИЯ =====
-    if ctx.user_data.get("adm_set_create") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_create")
-        player = players.get(pid_str)
-        if not player:
-            await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
-            return
+    # ===== АДМИН: ЦЕНА ТОВАРА =====
+    if ctx.user_data.get("awaiting_goods_price") and uid == admin_id:
+        try:
+            price = int(text)
+            if price <= 0:
+                await ctx.bot.send_message(chat_id=uid, text="Цена должна быть положительной.")
+                return
+            
+            bot_data["goods_price"] = price
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Цена за единицу товара установлена: {price} крышек.")
+            
+            players_map = bot_data.get("players", {})
+            for pid_str in players_map:
+                try:
+                    await ctx.bot.send_message(
+                        chat_id=int(pid_str),
+                        text=f"💰 Цена за единицу товара изменена. Теперь она составляет {price} крышек."
+                    )
+                except:
+                    pass
+            
+            add_log(ctx, f"Админ {user.first_name} установил глобальную цену товара: {price}")
+        except ValueError:
+            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
         
-        player["settlement"] = {
-            "name": text,
-            "population": 0,
-            "daily_income": 0,
-            "balance": 0
-        }
-        save_data(ctx)
-        
-        await ctx.bot.send_message(chat_id=uid, text=f"✅ Поселение '{text}' создано для игрока {player.get('first_name')}.")
-        try:
-            await ctx.bot.send_message(chat_id=int(pid_str), text=f"✅ Админ создал вам новое поселение: '{text}'")
-        except:
-            pass
-        add_log(ctx, f"Админ {user.first_name} создал поселение '{text}' для игрока {pid_str}")
+        ctx.user_data.pop("awaiting_goods_price", None)
         return
 
-    # ===== АДМИН: ПОСЕЛЕНИЕ - ИЗМЕНИТЬ НАЗВАНИЕ =====
-    if ctx.user_data.get("adm_set_edit_name") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_edit_name")
-        player = players.get(pid_str)
-        if not player:
-            await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
-            return
-        settlement = player.get("settlement", {})
-        settlement["name"] = text
-        save_data(ctx)
-        await ctx.bot.send_message(chat_id=uid, text=f"Название поселения изменено на: {text}")
-        try:
-            await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ изменил название вашего поселения на: {text}")
-        except:
-            pass
-        return
-
-    # ===== АДМИН: ПОСЕЛЕНИЕ - ДОБАВИТЬ НАСЕЛЕНИЕ =====
-    if ctx.user_data.get("adm_set_add_pop") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_add_pop")
-        try:
-            qty = int(text)
-            if qty <= 0:
-                await ctx.bot.send_message(chat_id=uid, text="Количество должно быть положительным.")
-                return
-            player = players.get(pid_str)
-            if not player:
-                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
-                return
-            settlement = player.get("settlement", {})
-            settlement["population"] = settlement.get("population", 0) + qty
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Население поселения увеличено на {qty}. Новое население: {settlement['population']}")
-            try:
-                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ добавил {qty} человек в ваше поселение. Население: {settlement['population']}")
-            except:
-                pass
-        except ValueError:
-            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
-        return
-
-    # ===== АДМИН: ПОСЕЛЕНИЕ - ЗАБРАТЬ НАСЕЛЕНИЕ =====
-    if ctx.user_data.get("adm_set_remove_pop") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_remove_pop")
-        try:
-            qty = int(text)
-            if qty <= 0:
-                await ctx.bot.send_message(chat_id=uid, text="Количество должно быть положительным.")
-                return
-            player = players.get(pid_str)
-            if not player:
-                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
-                return
-            settlement = player.get("settlement", {})
-            current_pop = settlement.get("population", 0)
-            if current_pop < qty:
-                await ctx.bot.send_message(chat_id=uid, text=f"В поселении только {current_pop} человек.")
-                return
-            settlement["population"] = current_pop - qty
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Население поселения уменьшено на {qty}. Новое население: {settlement['population']}")
-            try:
-                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ забрал {qty} человек из вашего поселения. Население: {settlement['population']}")
-            except:
-                pass
-        except ValueError:
-            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
-        return
-
-    # ===== АДМИН: ПОСЕЛЕНИЕ - УСТАНОВИТЬ ДОХОД =====
-    if ctx.user_data.get("adm_set_set_income") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_set_income")
-        try:
-            income = int(text)
-            player = players.get(pid_str)
-            if not player:
-                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
-                return
-            settlement = player.get("settlement", {})
-            settlement["daily_income"] = income
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"Ежедневный доход/налог поселения установлен: {income} крышек")
-            try:
-                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ установил ежедневный доход вашего поселения: {income} крышек")
-            except:
-                pass
-        except ValueError:
-            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
-        return
-
-    # ===== АДМИН: ПОСЕЛЕНИЕ - ДОБАВИТЬ КРЫШКИ =====
-    if ctx.user_data.get("adm_set_add_balance") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_add_balance")
-        try:
-            amount = int(text)
-            if amount <= 0:
-                await ctx.bot.send_message(chat_id=uid, text="Сумма должна быть положительной.")
-                return
-            player = players.get(pid_str)
-            if not player:
-                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
-                return
-            settlement = player.get("settlement", {})
-            settlement["balance"] = settlement.get("balance", 0) + amount
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"На баланс поселения добавлено {amount} крышек. Новый баланс: {settlement['balance']}")
-            try:
-                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ добавил {amount} крышек на баланс вашего поселения. Баланс: {settlement['balance']}")
-            except:
-                pass
-        except ValueError:
-            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
-        return
-
-    # ===== АДМИН: ПОСЕЛЕНИЕ - ЗАБРАТЬ КРЫШКИ =====
-    if ctx.user_data.get("adm_set_remove_balance") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_remove_balance")
-        try:
-            amount = int(text)
-            if amount <= 0:
-                await ctx.bot.send_message(chat_id=uid, text="Сумма должна быть положительной.")
-                return
-            player = players.get(pid_str)
-            if not player:
-                await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
-                return
-            settlement = player.get("settlement", {})
-            current_balance = settlement.get("balance", 0)
-            if current_balance < amount:
-                await ctx.bot.send_message(chat_id=uid, text=f"На балансе поселения только {current_balance} крышек.")
-                return
-            settlement["balance"] = current_balance - amount
-            save_data(ctx)
-            await ctx.bot.send_message(chat_id=uid, text=f"С баланса поселения снято {amount} крышек. Новый баланс: {settlement['balance']}")
-            try:
-                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ снял {amount} крышек с баланса вашего поселения. Баланс: {settlement['balance']}")
-            except:
-                pass
-        except ValueError:
-            await ctx.bot.send_message(chat_id=uid, text="Введите целое число.")
-        return
-
-    # ===== АДМИН: ПОСЕЛЕНИЕ - УСТАНОВИТЬ ВРЕМЯ ДОХОДА =====
-    if ctx.user_data.get("adm_set_set_time") and uid == admin_id:
-        pid_str = ctx.user_data.pop("adm_set_set_time")
+    # ===== АДМИН: ВРЕМЯ ПРОИЗВОДСТВА =====
+    if ctx.user_data.get("awaiting_production_time") and uid == admin_id:
         try:
             hour, minute = map(int, text.split(':'))
             if not (0 <= hour <= 23 and 0 <= minute <= 59):
                 raise ValueError
+            
             time_str = f"{hour:02d}:{minute:02d}"
-            if job_queue:
-                schedule_settlement_income(job_queue, pid_str, dt_time(hour, minute))
-            await ctx.bot.send_message(chat_id=uid, text=f"Время ежедневного дохода поселения установлено: {time_str}")
-            try:
-                await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ установил время ежедневного дохода вашего поселения: {time_str}")
-            except:
-                pass
+            bot_data["production_time"] = time_str
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Время производства установлено: {time_str}.")
+            
+            players_map = bot_data.get("players", {})
+            for pid_str, player in players_map.items():
+                prod = player.get("production")
+                if prod:
+                    cancel_production_job(job_queue, pid_str)
+                    schedule_production_job(job_queue, pid_str, prod["type"], dt_time(hour, minute))
+            
+            add_log(ctx, f"Админ {user.first_name} изменил время производства на {time_str}")
         except:
-            await ctx.bot.send_message(chat_id=uid, text="Неверный формат. Используйте ЧЧ:ММ (например, 09:00).")
+            await ctx.bot.send_message(chat_id=uid, text="Неверный форма��. Используйте ЧЧ:ММ (например, 18:00).")
+        
+        ctx.user_data.pop("awaiting_production_time", None)
+        return
+
+    # ===== АДМИН: ВРЕМЯ ФОРМЫ ПРАВЛЕНИЯ =====
+    if ctx.user_data.get("awaiting_government_time") and uid == admin_id:
+        try:
+            hour, minute = map(int, text.split(':'))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                raise ValueError
+            
+            time_str = f"{hour:02d}:{minute:02d}"
+            bot_data["government_time"] = time_str
+            save_data(ctx)
+            
+            await ctx.bot.send_message(chat_id=uid, text=f"✅ Время формы правления установлено: {time_str}.")
+            
+            players_map = bot_data.get("players", {})
+            for pid_str, player in players_map.items():
+                gov = player.get("government")
+                if gov:
+                    cancel_government_job(job_queue, pid_str)
+                    schedule_government_job(job_queue, pid_str, gov["type"], dt_time(hour, minute))
+            
+            add_log(ctx, f"Админ {user.first_name} изменил время формы правления на {time_str}")
+        except:
+            await ctx.bot.send_message(chat_id=uid, text="Неверный формат. Используйте ЧЧ:ММ (например, 18:00).")
+        
+        ctx.user_data.pop("awaiting_government_time", None)
         return
 
     # ===== АДМИН: ПЛАНОВЫЕ ВЫПЛАТЫ КРЫШЕК =====
@@ -4312,10 +4558,11 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not player:
                 await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
                 return
+            
             if job_queue:
                 try:
                     schedule_payment_job(job_queue, pid_str, amount, dt_time(18, 0))
-                    await ctx.bot.send_message(chat_id=uid, text=f"Плановая выплата {amount} крышек для игрока {pid_str} установлена на ежедневно в 18:00.")
+                    await ctx.bot.send_message(chat_id=uid, text=f"✅ Плановая выплата {amount} крышек для игрока {pid_str} установлена на ежедневно в 18:00.")
                     try:
                         await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ установил ежедневную выплату {amount} крышек.")
                     except:
@@ -4338,10 +4585,11 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not player:
                 await ctx.bot.send_message(chat_id=uid, text="Игрок не найден.")
                 return
+            
             if job_queue:
                 try:
                     schedule_goods_job(job_queue, pid_str, qty, dt_time(18, 0))
-                    await ctx.bot.send_message(chat_id=uid, text=f"Плановая выплата {qty} товара для игрока {pid_str} установлена на ежедневно в 18:00.")
+                    await ctx.bot.send_message(chat_id=uid, text=f"✅ Плановая выплата {qty} товара для игрока {pid_str} установлена на ежедневно в 18:00.")
                     try:
                         await ctx.bot.send_message(chat_id=int(pid_str), text=f"Админ установил ежедневную выплату {qty} товара.")
                     except:
@@ -4356,23 +4604,14 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     return
-
-
-# ===== ERROR HANDLER =====
+    # ===== ERROR HANDLER =====
 async def error_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     logger.error("Exception while handling an update:", exc_info=ctx.error)
-    logger.error(f"Update that caused error: {update}")
-    logger.error(f"Full error: {ctx.error}")
-    
     try:
-        if update and update.effective_user:
-            error_text = str(ctx.error)[:100]
-            await ctx.bot.send_message(
-                chat_id=update.effective_user.id, 
-                text=f"❌ Произошла ошибка:\n{error_text}\n\nПопробуйте позже или обратитесь к админу."
-            )
-    except Exception as e:
-        logger.exception(f"Failed to send error message: {e}")
+        if update.effective_user:
+            await ctx.bot.send_message(chat_id=update.effective_user.id, text="Произошла ошибка. Попробуй позже.")
+    except:
+        pass
 
 
 # ===== MAIN =====
@@ -4380,6 +4619,7 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.bot_data.update(load_data())
 
+    # Восстанавливаем задания производства, формы правления и войны
     if app.job_queue is not None:
         players = app.bot_data.get("players", {})
         prod_time_str = app.bot_data.get("production_time", "18:00")
@@ -4388,16 +4628,23 @@ def main():
         gov_hour, gov_minute = map(int, gov_time_str.split(':'))
 
         for pid, player in players.items():
+            # Восстанавливаем производство
             prod = player.get("production")
             if prod:
                 schedule_production_job(app.job_queue, pid, prod["type"], dt_time(prod_hour, prod_minute))
+            
+            # Восстанавливаем форму правления
             gov = player.get("government")
             if gov:
                 schedule_government_job(app.job_queue, pid, gov["type"], dt_time(gov_hour, gov_minute))
-            settlement = player.get("settlement", {})
-            if settlement.get("daily_income"):
-                schedule_settlement_income(app.job_queue, pid, dt_time(18, 0))
+            
+            # Восстанавливаем поселения с доходом
+            settlements = player.get("settlements", [])
+            for set_idx, settlement in enumerate(settlements):
+                if settlement.get("daily_income"):
+                    schedule_settlement_income(app.job_queue, pid, set_idx, dt_time(18, 0))
         
+        # Восстанавливаем задания начала войн
         treaties = app.bot_data.get("active_treaties", {})
         for tid, treaty in treaties.items():
             if treaty.get("type") == "war" and treaty.get("pending") and treaty.get("start_after"):
@@ -4405,6 +4652,7 @@ def main():
                 if delay > 0:
                     schedule_war_start(app.job_queue, tid, delay)
         
+        # Восстанавливаем плановые выплаты
         scheduled_payments = app.bot_data.get("scheduled_payments", {})
         for pid_str, info in scheduled_payments.items():
             if info.get("amount"):
@@ -4417,6 +4665,7 @@ def main():
     else:
         logger.warning("JobQueue не настроен. Производство, форма правления и войны по расписанию работать не будут.")
 
+    # Handlers
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("setgroup", cmd_setgroup))
     app.add_handler(CommandHandler("admin", cmd_admin))
